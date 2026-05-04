@@ -220,6 +220,7 @@ pub struct R1csIpaParams<G: CurveGroup> {
     pub g_vec: Vec<G>,
     pub h_vec: Vec<G>,
     pub u:G,
+    pub h_b:G,
     pub n_pad: usize,
 }
 
@@ -227,6 +228,12 @@ pub struct R1csIpaProof<G: CurveGroup> {
     pub v_a: G,
     pub v_b: G,
     pub v_c: G,
+    pub s:G,
+    pub t1_commit: G,
+    pub t2_commit: G,
+    pub t_hat: G::ScalarField,
+    pub tau_x: G::ScalarField,
+    pub mu: G::ScalarField,
     pub ipa: IpaProof<G>,
 }
 
@@ -239,13 +246,15 @@ pub fn setup<G: CurveGroup, R: ark_std::rand::Rng> (
     let g_vec:Vec<G> = (0..two_n).map(|_| G::rand(rng)).collect();
     let h_vec:Vec<G> = (0..two_n).map(|_| G::rand(rng)).collect();
     let u = G::rand(rng);
-    R1csIpaParams {g_vec, h_vec, u, n_pad}
+    let h_b = G::rand(rng);
+    R1csIpaParams {g_vec, h_vec, u, h_b, n_pad}
 }
 
 
-pub fn prove_r1cs<G: CurveGroup> (
+pub fn prove_r1cs<G: CurveGroup, R: ark_std::rand::Rng> (
     cs: ConstraintSystemRef<G::ScalarField>,
     params: &R1csIpaParams<G>,
+    rng: &mut R,
 ) -> R1csIpaProof<G> {
     
     cs.finalize();
@@ -269,9 +278,16 @@ pub fn prove_r1cs<G: CurveGroup> (
     let (g_lo, g_hi) = params.g_vec.split_at(n_pad);
     let (h_lo, _h_hi) = params.h_vec.split_at(n_pad);
 
-    let v_a:G = pedersen_vec(&az, g_lo);
-    let v_c:G = pedersen_vec(&cz, g_hi);
-    let v_b:G = pedersen_vec(&bz, h_lo);
+    //blinding scalars
+    let alpha = G::ScalarField::rand(rng);
+    let beta = G::ScalarField::rand(rng);
+    let gamma = G::ScalarField::rand(rng);
+    
+
+    //blinded commitments
+    let v_a:G = pedersen_vec(&az, g_lo) + params.h_b * alpha;
+    let v_c:G = pedersen_vec(&cz, g_hi) + params.h_b * gamma;
+    let v_b:G = pedersen_vec(&bz, h_lo) + params.h_b * beta;
 
     let mut transcript = Transcript::new(b"R1CS-IPA");
     transcript.dom_sep((2 * n_pad) as u64);
@@ -302,16 +318,52 @@ pub fn prove_r1cs<G: CurveGroup> (
     let mut h_prime: Vec<G> = h_lo_rebased;
     h_prime.extend_from_slice(h_hi);
 
+    let s_l: Vec<G::ScalarField> = (0..2 * n_pad).map(|_| G::ScalarField::rand(rng)).collect();
+    let s_r: Vec<G::ScalarField> = (0..2 * n_pad).map(|_| G::ScalarField::rand(rng)).collect();
+
+    let rho = G::ScalarField::rand(rng);
+    let s_commit: G = pedersen_vec(&s_l, &params.g_vec)
+                      + pedersen_vec(&s_r, &h_prime)
+                      + params.h_b * rho;
+
+    transcript.append_point(b"S", &s_commit);
+
+    let t_1 = inner_product(&a_full, &s_r) + inner_product(&s_l, &b_full);
+    let t_2 = inner_product(&s_l, &s_r);
+
+    let tau_1 = G::ScalarField::rand(rng);
+    let tau_2 = G::ScalarField::rand(rng);
+
+    let t1_commit: G = params.u * t_1 + params.h_b * tau_1;
+    let t2_commit: G = params.u * t_2 + params.h_b * tau_2;
+
+    transcript.append_point(b"T_1", &t1_commit);
+    transcript.append_point(b"T_2", &t2_commit);
+
+    let x: G::ScalarField = transcript.get_challenge(b"x");
+
+    let l_eval: Vec<G::ScalarField> = a_full.iter().zip(&s_l)
+                .map(|(a, s)| *a + *s * x).collect();
+    let r_eval: Vec<G::ScalarField> = b_full.iter().zip(&s_r)
+                .map(|(b, s)| *b + *s * x).collect();
+
+
+    let t_hat = inner_product(&l_eval, &r_eval);
+
+    let tau_x = tau_1 * x + tau_2 * x * x;
+
+    let mu = alpha + beta + gamma + rho * x;
+
     let ipa = prove_ipa::<G>(
         &mut transcript,
-        a_full,
-        b_full,
+        l_eval,
+        r_eval,
         params.g_vec.clone(),
         h_prime,
         params.u,
     );
 
-    R1csIpaProof{v_a, v_b, v_c, ipa}
+    R1csIpaProof{v_a, v_b, v_c, s: s_commit, t1_commit, t2_commit, t_hat, tau_x, mu, ipa}
 }
 
 pub fn verify_r1cs<G:CurveGroup>(
@@ -347,7 +399,22 @@ pub fn verify_r1cs<G:CurveGroup>(
         .map(|(h, y_i)| *h * (-*y_i))
         .sum();
 
-    let p_initial:G = proof.v_a + proof.v_c + proof.v_b + h_hi_neg_y_pow;
+    transcript.append_point(b"S", &proof.s);
+    transcript.append_point(b"T_1", &proof.t1_commit);   // ADD THIS
+    transcript.append_point(b"T_2", &proof.t2_commit);
+    let x: G::ScalarField = transcript.get_challenge(b"x");
+    
+    let check_a_lhs = params.u * proof.t_hat + params.h_b * proof.tau_x;
+    let check_a_rhs = proof.t1_commit * x + proof.t2_commit * (x * x);
+    if check_a_lhs != check_a_rhs {
+        return false;
+    }
+
+
+
+    let p_base:G = proof.v_a + proof.v_c + proof.v_b + h_hi_neg_y_pow
+                        +proof.s * x - params.h_b * proof.mu;
+    let p_initial = p_base + params.u * proof.t_hat;
 
     verify_ipa::<G>(
         &mut transcript,
@@ -406,17 +473,35 @@ fn main(){
 
     let params = setup::<G1Projective, _>(n_pad, &mut rng);
 
-    let proof = prove_r1cs::<G1Projective>(cs.clone(), &params);
+    let proof = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
     println!("  IPA recusrion : {} rounds", proof.ipa.l_vec.len());
 
     let ok = verify_r1cs::<G1Projective>(&params, &proof);
     println!(" verification : {}", ok);
     assert!(ok, "honest proof must verify");
 
+    let proof1 = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
+let proof2 = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
+println!(" V_A different across runs (hiding works): {}", proof1.v_a != proof2.v_a);
+
+
+    let proof_a = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
+let proof_b = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
+println!(" t_hat varies across runs (full ZK works): {}", proof_a.t_hat != proof_b.t_hat);
+println!(" S varies across runs:                      {}", proof_a.s != proof_b.s);
+println!(" T_1 varies across runs:                    {}", proof_a.t1_commit != proof_b.t1_commit);
+
+
     let mut bad = R1csIpaProof{
         v_a: proof.v_a,
         v_b: proof.v_b,
         v_c: proof.v_c,
+        s: proof.s,
+        t1_commit: proof.t1_commit,
+        t2_commit: proof.t2_commit,
+        t_hat: proof.t_hat,
+        tau_x: proof.tau_x,
+        mu: proof.mu,
         ipa: IpaProof {
             l_vec: proof.ipa.l_vec.clone(),
             r_vec: proof.ipa.r_vec.clone(),
@@ -440,7 +525,7 @@ fn main(){
     println!(" bad-witness sat? :{} ", cs2.is_satisfied().unwrap());
 
     if cfg!(not(debug_assertions)) {
-        let bad_proof = prove_r1cs::<G1Projective>(cs2, &params);
+        let bad_proof = prove_r1cs::<G1Projective,_>(cs2, &params, &mut rng);
         let bad_ok = verify_r1cs::<G1Projective>(&params, &bad_proof);
         println!(" bad-witness valid: {} (expected false)", bad_ok);
         assert!(!bad_ok);
