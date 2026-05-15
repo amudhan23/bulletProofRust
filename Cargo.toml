@@ -11,3 +11,10 @@ ark-bls12-381 = "0.4.0"
 ark-serialize = "0.4.0"
 merlin = "3.0.0"
 ark-relations = "0.4.0"
+ark-crypto-primitives = { version = "0.4", features = [
+    "crh",
+    "r1cs",
+    "sponge",
+] }
+ark-r1cs-std = "0.4"
+sha2 = "0.10"

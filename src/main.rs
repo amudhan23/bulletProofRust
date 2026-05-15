@@ -8,7 +8,13 @@ use ark_ff::Field;
 use circuit::CubicCircuit;
 use ark_relations::r1cs::{ConstraintSystem, ConstraintSynthesizer, ConstraintMatrices, Matrix};
 use ark_relations::r1cs::ConstraintSystemRef;
-mod circuit;
+mod circuit_bench;     
+mod circuit;                     
+use circuit_bench::PowerCircuit;            
+use std::time::Instant;
+mod circuit_sha256;
+use circuit_sha256::Sha256Circuit;
+use sha2::{Sha256 as Sha256Hasher, Digest};
 
 pub trait TranscriptProtocol{
     fn dom_sep(&mut self, n: u64);
@@ -400,7 +406,7 @@ pub fn verify_r1cs<G:CurveGroup>(
         .sum();
 
     transcript.append_point(b"S", &proof.s);
-    transcript.append_point(b"T_1", &proof.t1_commit);   // ADD THIS
+    transcript.append_point(b"T_1", &proof.t1_commit);  
     transcript.append_point(b"T_2", &proof.t2_commit);
     let x: G::ScalarField = transcript.get_challenge(b"x");
     
@@ -424,6 +430,133 @@ pub fn verify_r1cs<G:CurveGroup>(
         h_prime,
         params.u,
     )
+}
+
+
+fn test_sha256() {
+    println!("\n=== SHA256 single-proof test ===");
+    let mut rng = ark_std::test_rng();
+
+    // Small fixed preimage for testing
+    let preimage = b"hello".to_vec();
+
+    // Compute reference SHA256 using the sha2 crate (outside the circuit)
+    let expected_hash: Vec<u8> = {
+        let mut h = Sha256Hasher::new();
+        h.update(&preimage);
+        h.finalize().to_vec()
+    };
+    println!(" preimage: {:?}", String::from_utf8_lossy(&preimage));
+    println!(" expected hash (hex): {}",
+             expected_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+
+    let circuit = Sha256Circuit::<Fr> {
+        preimage,
+        expected_hash,
+        _phantom: std::marker::PhantomData,
+    };
+
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    circuit.generate_constraints(cs.clone()).unwrap();
+    cs.finalize();
+
+    let num_constraints = cs.num_constraints();
+    println!(" R1CS constraints: {}", num_constraints);
+    assert!(cs.is_satisfied().unwrap(), "SHA256 circuit not satisfied");
+
+    let n_pad = num_constraints.next_power_of_two().max(2);
+    println!(" n_pad: {}", n_pad);
+
+    println!(" Generating parameters...");
+    let setup_start = Instant::now();
+    let params = setup::<G1Projective, _>(n_pad, &mut rng);
+    println!(" Setup: {:.2} s", setup_start.elapsed().as_secs_f64());
+
+    println!(" Proving...");
+    let prove_start = Instant::now();
+    let proof = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
+    let prove_elapsed = prove_start.elapsed();
+    println!(" Prove: {:.2} s", prove_elapsed.as_secs_f64());
+
+    println!(" Verifying...");
+    let verify_start = Instant::now();
+    let ok = verify_r1cs::<G1Projective>(&params, &proof);
+    let verify_elapsed = verify_start.elapsed();
+    println!(" Verify: {:.2} s", verify_elapsed.as_secs_f64());
+
+    assert!(ok, "SHA256 proof must verify");
+
+    let rounds = proof.ipa.l_vec.len();
+    let proof_bytes = 6 * 48 + 3 * 32 + 2 * rounds * 48 + 2 * 32;
+    println!(" Proof size: {} bytes ({} IPA rounds)", proof_bytes, rounds);
+    println!(" Verification: {}", ok);
+}
+
+
+fn benchmark() {
+    println!("\n=== Benchmark: ZK Bulletproofs over R1CS ===");
+    println!("{:>10} {:>8} {:>14} {:>14} {:>14} {:>8}",
+             "constraints", "n_pad", "prove (ms)", "verify (ms)", "proof (bytes)", "rounds");
+    println!("{}", "-".repeat(78));
+
+    let sizes = [3, 15, 63, 255, 1023];
+
+    for &num_mults in &sizes {
+        let mut rng = ark_std::test_rng();
+
+
+        let x_val = Fr::from(2u32);
+        let mut y_val = x_val;
+        for _ in 0..num_mults {
+            y_val *= x_val;
+        }
+
+        let circuit = PowerCircuit {
+            x: Some(x_val),
+            y: y_val,
+            num_mults,
+        };
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        cs.finalize();
+
+        assert!(cs.is_satisfied().unwrap(), "circuit not satisfied at num_mults={}", num_mults);
+
+        let actual_constraints = cs.num_constraints();
+        let n_pad = actual_constraints.next_power_of_two().max(2);
+        let params = setup::<G1Projective, _>(n_pad, &mut rng);
+
+        let _ = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
+
+        let prove_start = Instant::now();
+        let proof = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
+        let prove_elapsed = prove_start.elapsed();
+
+
+        let verify_start = Instant::now();
+        let ok = verify_r1cs::<G1Projective>(&params, &proof);
+        let verify_elapsed = verify_start.elapsed();
+
+        assert!(ok, "honest proof must verify at num_mults={}", num_mults);
+
+       
+        let rounds = proof.ipa.l_vec.len();
+        let proof_bytes = 6 * 48 + 3 * 32 + 2 * rounds * 48 + 2 * 32;
+
+        println!("{:>10} {:>8} {:>14.2} {:>14.2} {:>14} {:>8}",
+                 actual_constraints,
+                 n_pad,
+                 prove_elapsed.as_secs_f64() * 1000.0,
+                 verify_elapsed.as_secs_f64() * 1000.0,
+                 proof_bytes,
+                 rounds);
+    }
+    println!("{}", "-".repeat(78));
+    println!("Notes:");
+    println!("  - Run with `cargo run --release` for representative timings.");
+    println!("  - Proof size grows as O(log n) — Bulletproofs' headline feature.");
+    println!("  - Prover/verifier scale linearly with circuit size.");
 }
 
 
@@ -481,17 +614,17 @@ fn main(){
     assert!(ok, "honest proof must verify");
 
     let proof1 = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
-let proof2 = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
-println!(" V_A different across runs (hiding works): {}", proof1.v_a != proof2.v_a);
+    let proof2 = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
+    println!(" V_A different across runs (hiding works): {}", proof1.v_a != proof2.v_a);
 
 
     let proof_a = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
-let proof_b = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
-println!(" t_hat varies across runs (full ZK works): {}", proof_a.t_hat != proof_b.t_hat);
-println!(" S varies across runs:                      {}", proof_a.s != proof_b.s);
-println!(" T_1 varies across runs:                    {}", proof_a.t1_commit != proof_b.t1_commit);
+    let proof_b = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
+    println!(" t_hat varies across runs (full ZK works): {}", proof_a.t_hat != proof_b.t_hat);
+    println!(" S varies across runs:                      {}", proof_a.s != proof_b.s);
+    println!(" T_1 varies across runs:                    {}", proof_a.t1_commit != proof_b.t1_commit);
 
-
+    
     let mut bad = R1csIpaProof{
         v_a: proof.v_a,
         v_b: proof.v_b,
@@ -534,5 +667,8 @@ println!(" T_1 varies across runs:                    {}", proof_a.t1_commit != 
     }
 
     let _ = bad.ipa.a_final;
+
+    test_sha256();
+    benchmark();
 }
 
