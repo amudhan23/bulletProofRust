@@ -15,6 +15,7 @@ use std::time::Instant;
 mod circuit_sha256;
 use circuit_sha256::Sha256Circuit;
 use sha2::{Digest, Sha256 as Sha256Hasher};
+mod arith;
 mod square_circuit;
 
 #[cfg(test)]
