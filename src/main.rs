@@ -10,6 +10,7 @@ use circuit::CubicCircuit;
 use merlin::Transcript;
 mod circuit;
 mod circuit_bench;
+mod protocol;
 use circuit_bench::PowerCircuit;
 use std::time::Instant;
 mod circuit_sha256;
@@ -48,11 +49,11 @@ impl TranscriptProtocol for Transcript {
     }
 }
 
-fn inner_product<F: PrimeField>(a: &[F], b: &[F]) -> F {
+fn inner_product<G: CurveGroup>(a: &[G::ScalarField], b: &[G::ScalarField]) -> G::ScalarField {
     a.iter().zip(b.iter()).map(|(a_i, b_i)| *a_i * *b_i).sum()
 }
 
-fn hadamard<F: Field>(a: &[F], b: &[F]) -> Vec<F> {
+fn hadamard<G: CurveGroup>(a: &[G::ScalarField], b: &[G::ScalarField]) -> Vec<G::ScalarField> {
     a.iter().zip(b.iter()).map(|(x, y)| *x * *y).collect()
 }
 
@@ -245,6 +246,14 @@ pub struct R1csIpaParams<G: CurveGroup> {
     pub u: G,
     pub h_b: G,
     pub n_pad: usize,
+}
+
+pub struct ProofParams<G: CurveGroup> {
+    pub g: Vec<G>,
+    pub h: Vec<G>,
+    pub u: G,
+    pub h_b: G,
+    pub n: usize,
 }
 
 pub struct R1csIpaProof<G: CurveGroup> {

@@ -1,12 +1,13 @@
 use ark_bls12_381::Fr;
 use ark_crypto_primitives::crh::bowe_hopwood::constraints;
+use ark_ec::CurveGroup;
 use ark_ff::PrimeField;
 use ark_relations::r1cs::{
     ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef,
     SynthesisError,
 };
 
-use crate::{hadamard, inner_product};
+use crate::{hadamard, inner_product, powers_of};
 
 pub type SparseRow<F> = Vec<(usize, F)>;
 
@@ -21,23 +22,38 @@ pub struct ArithCircuit<F: PrimeField> {
     pub c_pub: Vec<F>,
 }
 
-fn delta<F: PrimeField>(y: F, f_l: &[F], f_r: &[F]) -> F {
-    let mut y_inv_pows = Vec::with_capacity(f_r.len());
-
+pub fn delta<F: PrimeField>(y: F, f_l: &[F], f_r: &[F]) -> F {
     let y_inv = y.inverse().unwrap();
-    let mut cur_inv = y_inv;
-
-    for _ in 0..f_l.len() {
-        y_inv_pows.push(cur_inv);
-        cur_inv *= y_inv;
-    }
+    let y_inv_pows = powers_of(y_inv, f_l.len());
 
     let had_product = hadamard(&y_inv_pows, f_r);
     inner_product(&had_product, f_l)
 }
 
+pub fn assign<G: CurveGroup>(
+    mats: &ConstraintMatrices<G::ScalarField>,
+    z: &[G::ScalarField],
+) -> (
+    Vec<G::ScalarField>,
+    Vec<G::ScalarField>,
+    Vec<G::ScalarField>,
+) {
+    let mv = |m: &Vec<Vec<(G::ScalarField, usize)>>| -> Vec<G::ScalarField> {
+        m.iter()
+            .map(|row| row.iter().map(|(c, j)| *c * z[*j]).sum())
+            .collect()
+    };
+    let (mut a_l, mut a_r, mut a_o) = (mv(&mats.a), mv(&mats.b), mv(&mats.c));
+    for j in mats.num_instance_variables..z.len() {
+        a_l.push(z[j]);
+        a_r.push(G::ScalarField::one());
+        a_o.push(z[j]);
+    }
+    (a_l, a_r, a_o)
+}
+
 impl<F: PrimeField> ArithCircuit<F> {
-    fn convert_to_f_vectors(&self, z_pows: &[F]) -> (Vec<F>, Vec<F>, Vec<F>, Vec<F>, F) {
+    pub fn convert_to_f_vectors(&self, z_pows: &[F]) -> (Vec<F>, Vec<F>, Vec<F>, Vec<F>, F) {
         let n = (self.num_constraints + self.num_witness_variables).next_power_of_two();
         let mut f_l: Vec<F> = vec![F::zero(); n];
         let mut f_r: Vec<F> = vec![F::zero(); n];
@@ -65,7 +81,7 @@ impl<F: PrimeField> ArithCircuit<F> {
         (f_l, f_r, f_o, f_v, f_c)
     }
 
-    fn convert_to_wiring_constraint(mats: &ConstraintMatrices<F>, instance: &[F]) -> Self {
+    pub fn convert_to_wiring_constraint(mats: &ConstraintMatrices<F>, instance: &[F]) -> Self {
         let num_constraints = mats.num_constraints;
         let num_witness_variables = mats.num_witness_variables;
         let num_instance_variables = mats.num_instance_variables;
@@ -377,5 +393,131 @@ mod sha_tests {
         inst2[last] = Fr::from(1u32) - inst2[last];
         let ac2 = ArithCircuit::convert_to_wiring_constraint(&mats, &inst2);
         assert!(!resid(&ac2.c_pub, &witness));
+    }
+}
+
+#[cfg(test)]
+mod t2_tests {
+    use super::*;
+    use crate::circuit::CubicCircuit;
+    use crate::{hadamard, inner_product, powers_of};
+    use ark_bls12_381::Fr;
+    use ark_ff::Field;
+    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, Matrix};
+
+    fn matvec(m: &Matrix<Fr>, z: &[Fr]) -> Vec<Fr> {
+        m.iter()
+            .map(|row| row.iter().map(|(c, j)| *c * z[*j]).sum())
+            .collect()
+    }
+
+    /// Pad a vector to length n with zeros
+    fn pad(v: &mut Vec<Fr>, n: usize) {
+        v.resize(n, Fr::from(0u32));
+    }
+
+    #[test]
+    fn t2_two_ways_cubic() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        CubicCircuit {
+            x: Some(Fr::from(3u32)),
+            out: Fr::from(35u32),
+        }
+        .generate_constraints(cs.clone())
+        .unwrap();
+        cs.finalize();
+        let mats = cs.to_matrices().unwrap();
+        let b = cs.borrow().unwrap();
+        let (instance, witness) = (b.instance_assignment.clone(), b.witness_assignment.clone());
+        drop(b);
+        let mut z = instance.clone();
+        z.extend(witness.iter().cloned());
+
+        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance);
+        let n = (ac.num_constraints + ac.num_witness_variables).next_power_of_two();
+        let q = ac.c_pub.len();
+
+        // random y and z (use deterministic "random" for reproducibility)
+        let y = Fr::from(123u32);
+        let zz = Fr::from(456u32);
+
+        // z_pows = [zz, zz^2, ..., zz^Q]
+        let z_pows: Vec<Fr> = {
+            let mut v = Vec::with_capacity(q);
+            let mut cur = zz;
+            for _ in 0..q {
+                v.push(cur);
+                cur *= zz;
+            }
+            v
+        };
+
+        // fold
+        let (f_l, f_r, f_o, _f_v, k_c) = ac.convert_to_f_vectors(&z_pows);
+
+        // --- Way 1: t2 = k_c + delta ---
+        let d = delta(y, &f_l, &f_r);
+        let t2_way1 = k_c + d;
+
+        // --- Way 2: t2 = <l1, r1> + <l2, r0> ---
+        // build a_L, a_R, a_O (with home gates), padded to n
+        let (mut a_l, mut a_r, mut a_o) = (
+            matvec(&mats.a, &z),
+            matvec(&mats.b, &z),
+            matvec(&mats.c, &z),
+        );
+        for j in mats.num_instance_variables..z.len() {
+            a_l.push(z[j]);
+            a_r.push(Fr::from(1u32));
+            a_o.push(z[j]);
+        }
+        pad(&mut a_l, n);
+        pad(&mut a_r, n);
+        pad(&mut a_o, n);
+
+        let y_n = powers_of(y, n); // [1, y, y^2, ..., y^(n-1)]  -- check your powers_of
+        let y_inv = y.inverse().unwrap();
+        let y_inv_n = powers_of(y_inv, n); // [1, y^-1, y^-2, ...]
+
+        // l₁ = a_L + y^{-n} ∘ f_R   (coefficient of X in l(X))
+        let l1: Vec<Fr> = a_l
+            .iter()
+            .zip(y_inv_n.iter().zip(f_r.iter()))
+            .map(|(al, (yi, fr))| *al + *yi * *fr)
+            .collect();
+
+        // r₁ = y^n ∘ a_R + f_L       (coefficient of X in r(X))
+        let r1: Vec<Fr> = y_n
+            .iter()
+            .zip(a_r.iter())
+            .zip(f_l.iter())
+            .map(|((yn, ar), fl)| *yn * *ar + *fl)
+            .collect();
+
+        // l₂ = a_O                    (coefficient of X² in l(X))
+        let l2 = a_o.clone();
+
+        // r₀ = f_O - y^n              (constant term of r(X))
+        let r0: Vec<Fr> = f_o
+            .iter()
+            .zip(y_n.iter())
+            .map(|(fo, yn)| *fo - *yn)
+            .collect();
+
+        let t2_way2 = inner_product(&l1, &r1) + inner_product(&l2, &r0);
+
+        assert_eq!(t2_way1, t2_way2, "honest cubic: t2 must match both ways");
+
+        // --- Tampered: change a witness value, way2 should differ ---
+        let mut a_l_bad = a_l.clone();
+        a_l_bad[ac.num_constraints] += Fr::from(1u32); // corrupt first home gate
+        let l1_bad: Vec<Fr> = a_l_bad
+            .iter()
+            .zip(y_inv_n.iter().zip(f_r.iter()))
+            .map(|(al, (yi, fr))| *al + *yi * *fr)
+            .collect();
+        let t2_bad = inner_product(&l1_bad, &r1) + inner_product(&l2, &r0);
+
+        assert_ne!(t2_way1, t2_bad, "tampered cubic: t2 must NOT match");
     }
 }
