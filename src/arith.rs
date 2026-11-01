@@ -1,13 +1,14 @@
 use ark_bls12_381::Fr;
 use ark_crypto_primitives::crh::bowe_hopwood::constraints;
 use ark_ec::CurveGroup;
-use ark_ff::PrimeField;
+use ark_ff::{Field, PrimeField};
 use ark_relations::r1cs::{
     ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef,
     SynthesisError,
 };
+use ark_std::One;
 
-use crate::{hadamard, inner_product, powers_of};
+use crate::powers_of;
 
 pub type SparseRow<F> = Vec<(usize, F)>;
 
@@ -22,11 +23,19 @@ pub struct ArithCircuit<F: PrimeField> {
     pub c_pub: Vec<F>,
 }
 
-pub fn delta<F: PrimeField>(y: F, f_l: &[F], f_r: &[F]) -> F {
+fn hadamard<Fr: PrimeField>(a: &[Fr], b: &[Fr]) -> Vec<Fr> {
+    a.iter().zip(b.iter()).map(|(x, y)| *x * *y).collect()
+}
+
+fn inner_product<F: PrimeField>(a: &[F], b: &[F]) -> F {
+    a.iter().zip(b.iter()).map(|(a_i, b_i)| *a_i * *b_i).sum()
+}
+
+pub fn delta<Fr: PrimeField>(y: Fr, f_l: &[Fr], f_r: &[Fr]) -> Fr {
     let y_inv = y.inverse().unwrap();
     let y_inv_pows = powers_of(y_inv, f_l.len());
 
-    let had_product = hadamard(&y_inv_pows, f_r);
+    let had_product: Vec<Fr> = hadamard(&y_inv_pows, &f_r);
     inner_product(&had_product, f_l)
 }
 
@@ -400,7 +409,7 @@ mod sha_tests {
 mod t2_tests {
     use super::*;
     use crate::circuit::CubicCircuit;
-    use crate::{hadamard, inner_product, powers_of};
+    use crate::{hadamard, powers_of};
     use ark_bls12_381::Fr;
     use ark_ff::Field;
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, Matrix};

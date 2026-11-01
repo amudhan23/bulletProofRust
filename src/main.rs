@@ -98,7 +98,7 @@ fn pedersen_with_ip<G: CurveGroup>(
     h_vec: &[G],
     u: G,
 ) -> G {
-    let c = inner_product(a, b);
+    let c = inner_product::<G>(a, b);
     pedersen_vec(a, g_vec) + pedersen_vec(b, h_vec) + u * c
 }
 
@@ -307,7 +307,7 @@ pub fn prove_r1cs<G: CurveGroup, R: ark_std::rand::Rng>(
     let bz = pad_zero(sparse_matvec(&matrices.b, &z, num_constraints), n_pad);
     let cz = pad_zero(sparse_matvec(&matrices.c, &z, num_constraints), n_pad);
 
-    debug_assert_eq!(hadamard(&az, &bz), cz, "R1CS violated by witness");
+    debug_assert_eq!(hadamard::<G>(&az, &bz), cz, "R1CS violated by witness");
 
     let (g_lo, g_hi) = params.g_vec.split_at(n_pad);
     let (h_lo, _h_hi) = params.h_vec.split_at(n_pad);
@@ -336,7 +336,7 @@ pub fn prove_r1cs<G: CurveGroup, R: ark_std::rand::Rng>(
     let mut a_full = az.clone();
     a_full.extend_from_slice(&cz);
 
-    let b_lo: Vec<G::ScalarField> = hadamard(&y_pow, &bz);
+    let b_lo: Vec<G::ScalarField> = hadamard::<G>(&y_pow, &bz);
     let b_hi: Vec<G::ScalarField> = y_pow.iter().map(|y_i| -*y_i).collect();
     let mut b_full = b_lo;
     b_full.extend_from_slice(&b_hi);
@@ -360,8 +360,8 @@ pub fn prove_r1cs<G: CurveGroup, R: ark_std::rand::Rng>(
 
     transcript.append_point(b"S", &s_commit);
 
-    let t_1 = inner_product(&a_full, &s_r) + inner_product(&s_l, &b_full);
-    let t_2 = inner_product(&s_l, &s_r);
+    let t_1 = inner_product::<G>(&a_full, &s_r) + inner_product::<G>(&s_l, &b_full);
+    let t_2 = inner_product::<G>(&s_l, &s_r);
 
     let tau_1 = G::ScalarField::rand(rng);
     let tau_2 = G::ScalarField::rand(rng);
@@ -377,7 +377,7 @@ pub fn prove_r1cs<G: CurveGroup, R: ark_std::rand::Rng>(
     let l_eval: Vec<G::ScalarField> = a_full.iter().zip(&s_l).map(|(a, s)| *a + *s * x).collect();
     let r_eval: Vec<G::ScalarField> = b_full.iter().zip(&s_r).map(|(b, s)| *b + *s * x).collect();
 
-    let t_hat = inner_product(&l_eval, &r_eval);
+    let t_hat = inner_product::<G>(&l_eval, &r_eval);
 
     let tau_x = tau_1 * x + tau_2 * x * x;
 
