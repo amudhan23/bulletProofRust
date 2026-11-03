@@ -77,7 +77,7 @@ fn scalar_vector_mul<G: CurveGroup>(
     v.iter().map(|y| x * *y).collect()
 }
 
-struct Proof<G: CurveGroup> {
+pub struct Proof<G: CurveGroup> {
     A_I: G,
     A_O: G,
     S: G,
@@ -103,7 +103,11 @@ pub fn prove<G: CurveGroup>(
     let ac = ArithCircuit::convert_to_wiring_constraint(mats, instance);
     let mut z = instance.to_vec();
     z.extend_from_slice(witness);
-    let (a_l, a_r, a_o) = assign::<G>(mats, &z);
+    let (mut a_l, mut a_r, mut a_o) = assign::<G>(mats, &z);
+    a_l.resize(params.n, G::ScalarField::zero());
+    a_r.resize(params.n, G::ScalarField::zero());
+    a_o.resize(params.n, G::ScalarField::zero());
+
     let alpha = G::ScalarField::rand(rng);
     let beta = G::ScalarField::rand(rng);
     let gamma = G::ScalarField::rand(rng);
@@ -194,7 +198,7 @@ pub fn prove<G: CurveGroup>(
     let h_prime: Vec<G> = params
         .h
         .iter()
-        .zip(y_pow.iter())
+        .zip(y_pow_inv.iter())
         .map(|(h, y)| *h * *y)
         .collect();
 
@@ -266,19 +270,19 @@ pub fn verify<G: CurveGroup>(
         + proof.T5 * x5
         + proof.T6 * x6;
 
-    if (t_lhs != t_rhs) {
+    if t_lhs != t_rhs {
         return false;
     }
 
     let h_prime: Vec<G> = params
         .h
         .iter()
-        .zip(y_pow.iter())
+        .zip(y_pow_inv.iter())
         .map(|(h, y)| *h * *y)
         .collect();
 
     let x_public_term = (vec_gen_prod(&vecs_hadamard_prod(&y_pow_inv, &f_r), &params.g) * x
-        + vec_gen_prod(&f_l, &h_prime));
+        + vec_gen_prod(&f_l, &h_prime) * x);
     let constant_term = vec_gen_prod(&vec_sub(&f_o, &y_pow), &h_prime);
 
     let P = proof.A_I * x + proof.A_O * x2 + proof.S * x3 - params.h_b * proof.myu
@@ -294,4 +298,127 @@ pub fn verify<G: CurveGroup>(
         h_prime,
         params.u,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use ark_bls12_381::{Fr, G1Projective};
+    use ark_relations::r1cs::{ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem};
+    use ark_std::UniformRand;
+    use merlin::Transcript;
+
+    use crate::ProofParams;
+    use crate::circuit::CubicCircuit;
+    use crate::protocol::{prove, verify};
+
+    /// Build the cubic circuit x^3 + x + 5 = out, return (mats, instance, witness, n)
+    fn cubic_setup() -> (ConstraintMatrices<Fr>, Vec<Fr>, Vec<Fr>, usize) {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        CubicCircuit {
+            x: Some(Fr::from(3u32)),
+            out: Fr::from(35u32),
+        }
+        .generate_constraints(cs.clone())
+        .unwrap();
+        cs.finalize();
+        assert!(cs.is_satisfied().unwrap());
+
+        let mats = cs.to_matrices().unwrap();
+        let b = cs.borrow().unwrap();
+        let instance = b.instance_assignment.clone();
+        let witness = b.witness_assignment.clone();
+
+        // n = next power of two of (num_constraints + num_witness_variables)
+        let n = (mats.num_constraints + mats.num_witness_variables).next_power_of_two();
+
+        (mats, instance, witness, n)
+    }
+
+    /// Build ProofParams with deterministic generators
+    fn make_params(n: usize) -> ProofParams<G1Projective> {
+        let mut rng = ark_std::test_rng();
+        let g: Vec<G1Projective> = (0..n).map(|_| G1Projective::rand(&mut rng)).collect();
+        let h: Vec<G1Projective> = (0..n).map(|_| G1Projective::rand(&mut rng)).collect();
+        let u = G1Projective::rand(&mut rng);
+        let h_b = G1Projective::rand(&mut rng);
+
+        ProofParams { g, h, u, h_b, n }
+    }
+
+    #[test]
+    fn honest_proof_verifies() {
+        let (mats, instance, witness, n) = cubic_setup();
+        let params = make_params(n);
+        let mut rng = ark_std::test_rng();
+
+        // Prove
+        let mut transcript_p = Transcript::new(b"r1cs_bp_test");
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &mut transcript_p,
+        );
+
+        // Verify with fresh transcript (same label)
+        let mut transcript_v = Transcript::new(b"r1cs_bp_test");
+        let ok = verify::<G1Projective>(&mats, &instance, &params, &proof, &mut transcript_v);
+
+        assert!(ok, "honest proof should verify");
+    }
+
+    #[test]
+    fn wrong_public_input_fails() {
+        let (mats, instance, witness, n) = cubic_setup();
+        let params = make_params(n);
+        let mut rng = ark_std::test_rng();
+
+        // Prove with correct instance
+        let mut transcript_p = Transcript::new(b"r1cs_bp_test");
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &mut transcript_p,
+        );
+
+        // Verify with wrong instance: claim out = 36 instead of 35
+        let mut wrong_instance = instance.clone();
+        wrong_instance[1] = Fr::from(36u32);
+
+        let mut transcript_v = Transcript::new(b"r1cs_bp_test");
+        let ok = verify::<G1Projective>(&mats, &wrong_instance, &params, &proof, &mut transcript_v);
+
+        assert!(!ok, "wrong public input should fail verification");
+    }
+
+    #[test]
+    fn wrong_witness_fails() {
+        let (mats, instance, _, n) = cubic_setup();
+        let params = make_params(n);
+        let mut rng = ark_std::test_rng();
+
+        // Prove with wrong witness: x = 4 instead of 3
+        // x^3 + x + 5 = 69, but we still claim out = 35
+        let bad_witness = vec![Fr::from(4u32), Fr::from(16u32), Fr::from(64u32)];
+
+        let mut transcript_p = Transcript::new(b"r1cs_bp_test");
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &bad_witness,
+            &params,
+            &mut rng,
+            &mut transcript_p,
+        );
+
+        let mut transcript_v = Transcript::new(b"r1cs_bp_test");
+        let ok = verify::<G1Projective>(&mats, &instance, &params, &proof, &mut transcript_v);
+
+        assert!(!ok, "wrong witness should fail verification");
+    }
 }

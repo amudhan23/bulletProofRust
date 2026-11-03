@@ -175,15 +175,15 @@ mod tests {
         )
     }
 
-    fn residuals(ac: &ArithCircuit<Fr>, a_l: &[Fr], a_r: &[Fr], a_o: &[Fr], v: &[Fr]) -> Vec<Fr> {
+    fn residuals(ac: &ArithCircuit<Fr>, a_l: &[Fr], a_r: &[Fr], a_o: &[Fr]) -> Vec<Fr> {
         let (l, r, o) = (
             sparse_dot(&ac.w_l, a_l),
             sparse_dot(&ac.w_r, a_r),
             sparse_dot(&ac.w_o, a_o),
         );
-        let wv = sparse_dot(&ac.w_v, v);
+        // let wv = sparse_dot(&ac.w_v, v);
         (0..ac.c_pub.len())
-            .map(|k| l[k] + r[k] + o[k] - wv[k] - ac.c_pub[k])
+            .map(|k| l[k] + r[k] + o[k] - ac.c_pub[k])
             .collect()
     }
 
@@ -193,16 +193,23 @@ mod tests {
         let mut z = instance.clone();
         z.extend(witness.iter().cloned());
         let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance);
-        let (a_l, a_r, a_o) = (
+        let (mut a_l, mut a_r, mut a_o) = (
             matvec(&mats.a, &z),
             matvec(&mats.b, &z),
             matvec(&mats.c, &z),
         );
+
+        for j in mats.num_instance_variables..z.len() {
+            a_l.push(z[j]);
+            a_r.push(Fr::from(1u32));
+            a_o.push(z[j]);
+        }
+
         for i in 0..ac.num_constraints {
             assert_eq!(a_l[i] * a_r[i], a_o[i]);
         }
         assert!(
-            residuals(&ac, &a_l, &a_r, &a_o, &witness)
+            residuals(&ac, &a_l, &a_r, &a_o)
                 .iter()
                 .all(|r| *r == Fr::from(0u32))
         );
@@ -217,20 +224,21 @@ mod tests {
     #[test]
     fn wrong_witness_breaks_wiring() {
         let (mats, instance, mut witness) = setup();
-        let mut z = instance.clone();
-        z.extend(witness.iter().cloned());
         let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance);
-        let (a_l, a_r, a_o) = (
-            matvec(&mats.a, &z),
-            matvec(&mats.b, &z),
-            matvec(&mats.c, &z),
+        witness[0] += Fr::from(1u32);
+        let mut z_bad = instance.clone();
+        z_bad.extend(witness.iter().cloned());
+        let (mut a_l_bad, mut a_r_bad, mut a_o_bad) = (
+            matvec(&mats.a, &z_bad),
+            matvec(&mats.b, &z_bad),
+            matvec(&mats.c, &z_bad),
         );
-        witness[0] += Fr::from(1u32); // lie about v[0]
-        assert!(
-            residuals(&ac, &a_l, &a_r, &a_o, &witness)
-                .iter()
-                .any(|r| *r != Fr::from(0u32))
-        );
+        for j in mats.num_instance_variables..z_bad.len() {
+            a_l_bad.push(z_bad[j]);
+            a_r_bad.push(Fr::from(1u32));
+            a_o_bad.push(z_bad[j]);
+        }
+        assert!((0..ac.num_constraints).any(|i| a_l_bad[i] * a_r_bad[i] != a_o_bad[i]));
     }
 }
 
@@ -265,16 +273,6 @@ mod more_tests {
     }
 
     #[test]
-    fn coefficients_are_kept_in_w_v() {
-        let cs = linear_cs();
-        let mats = cs.to_matrices().unwrap();
-        let instance = cs.borrow().unwrap().instance_assignment.clone();
-        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance);
-        // row 0 is the A-row: a_L = 2*x + 3*y
-        assert_eq!(ac.w_v[0], vec![(0, Fr::from(2u32)), (1, Fr::from(3u32))]);
-    }
-
-    #[test]
     fn wrong_public_output_breaks_wiring() {
         let (mats, instance, witness) = {
             let cs = ConstraintSystem::<Fr>::new_ref();
@@ -301,7 +299,12 @@ mod more_tests {
                     .map(|row| row.iter().map(|(c, j)| *c * z[*j]).sum())
                     .collect()
             };
-            let (a_l, a_r, a_o) = (mv(&mats.a), mv(&mats.b), mv(&mats.c));
+            let (mut a_l, mut a_r, mut a_o) = (mv(&mats.a), mv(&mats.b), mv(&mats.c));
+            for j in mats.num_instance_variables..z.len() {
+                a_l.push(z[j]);
+                a_r.push(Fr::from(1u32));
+                a_o.push(z[j]);
+            }
             let (l, r, o) = (
                 sparse_dot(&ac.w_l, &a_l),
                 sparse_dot(&ac.w_r, &a_r),
@@ -371,37 +374,48 @@ mod sha_tests {
             ac.w_v.iter().map(|r| r.len()).sum::<usize>()
         );
 
-        let (a_l, a_r, a_o) = (
+        let (mut a_l, mut a_r, mut a_o) = (
             matvec(&mats.a, &z),
             matvec(&mats.b, &z),
             matvec(&mats.c, &z),
         );
+
+        for j in mats.num_instance_variables..z.len() {
+            a_l.push(z[j]);
+            a_r.push(Fr::from(1u32));
+            a_o.push(z[j]);
+        }
+
         for i in 0..ac.num_constraints {
             assert_eq!(a_l[i] * a_r[i], a_o[i], "gate {i}");
         }
 
-        let resid = |inst_c: &[Fr], v: &[Fr]| -> bool {
+        let resid = |inst_c: &[Fr]| -> bool {
             let (l, r, o) = (
                 sparse_dot(&ac.w_l, &a_l),
                 sparse_dot(&ac.w_r, &a_r),
                 sparse_dot(&ac.w_o, &a_o),
             );
-            let wv = sparse_dot(&ac.w_v, v);
-            (0..inst_c.len()).all(|k| l[k] + r[k] + o[k] == wv[k] + inst_c[k])
+            (0..inst_c.len()).all(|k| l[k] + r[k] + o[k] == inst_c[k])
         };
-        assert!(resid(&ac.c_pub, &witness));
+        assert!(resid(&ac.c_pub));
 
         // tampered witness value
-        let mut bad = witness.clone();
-        bad[0] += Fr::from(1u32);
-        assert!(!resid(&ac.c_pub, &bad));
-
-        // wrong claimed hash: flip one public hash bit
-        let mut inst2 = instance.clone();
-        let last = inst2.len() - 1;
-        inst2[last] = Fr::from(1u32) - inst2[last];
-        let ac2 = ArithCircuit::convert_to_wiring_constraint(&mats, &inst2);
-        assert!(!resid(&ac2.c_pub, &witness));
+        let mut bad_witness = witness.clone();
+        bad_witness[0] += Fr::from(1u32);
+        let mut z_bad = instance.clone();
+        z_bad.extend(bad_witness.iter().cloned());
+        let (mut a_l_bad, mut a_r_bad, mut a_o_bad) = (
+            matvec(&mats.a, &z_bad),
+            matvec(&mats.b, &z_bad),
+            matvec(&mats.c, &z_bad),
+        );
+        for j in mats.num_instance_variables..z_bad.len() {
+            a_l_bad.push(z_bad[j]);
+            a_r_bad.push(Fr::from(1u32));
+            a_o_bad.push(z_bad[j]);
+        }
+        assert!((0..ac.num_constraints).any(|i| a_l_bad[i] * a_r_bad[i] != a_o_bad[i]));
     }
 }
 

@@ -14,7 +14,9 @@ mod protocol;
 use circuit_bench::PowerCircuit;
 use std::time::Instant;
 mod circuit_sha256;
+use ark_ec::AffineRepr;
 use circuit_sha256::Sha256Circuit;
+use sha2::Sha256;
 use sha2::{Digest, Sha256 as Sha256Hasher};
 mod arith;
 mod square_circuit;
@@ -269,13 +271,38 @@ pub struct R1csIpaProof<G: CurveGroup> {
     pub ipa: IpaProof<G>,
 }
 
+fn hash_to_generator<G: CurveGroup>(domain: &[u8], index: u64) -> G {
+    for counter in 0u64.. {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        hasher.update(b"/");
+        hasher.update(index.to_le_bytes());
+        hasher.update(b"/");
+        hasher.update(counter.to_le_bytes());
+        let hash = hasher.finalize();
+
+        // Try to map these bytes to a curve point
+        if let Some(point) = G::Affine::from_random_bytes(&hash) {
+            let point = point.mul_by_cofactor_to_group();
+            if !point.is_zero() {
+                return point;
+            }
+        }
+    }
+    unreachable!()
+}
+
 pub fn setup<G: CurveGroup, R: ark_std::rand::Rng>(n_pad: usize, rng: &mut R) -> R1csIpaParams<G> {
     assert!(n_pad.is_power_of_two());
     let two_n = 2 * n_pad;
-    let g_vec: Vec<G> = (0..two_n).map(|_| G::rand(rng)).collect();
-    let h_vec: Vec<G> = (0..two_n).map(|_| G::rand(rng)).collect();
-    let u = G::rand(rng);
-    let h_b = G::rand(rng);
+    let g_vec: Vec<G> = (0..two_n)
+        .map(|i| hash_to_generator::<G>(b"bulletproof_v1/g", i as u64))
+        .collect();
+    let h_vec: Vec<G> = (0..two_n)
+        .map(|i| hash_to_generator::<G>(b"bulletproof_v1/h", i as u64))
+        .collect();
+    let u = hash_to_generator::<G>(b"bulletproof_v1/u", 0);
+    let h_b = hash_to_generator::<G>(b"bulletproof_v1/h_b", 0);
     R1csIpaParams {
         g_vec,
         h_vec,
