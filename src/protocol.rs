@@ -202,7 +202,14 @@ pub fn prove<G: CurveGroup>(
         .map(|(h, y)| *h * *y)
         .collect();
 
-    let ipa_proof = prove_ipa(transcript, l_x, r_x, params.g.clone(), h_prime, params.u);
+    transcript.append_scalar(b"t_x", t_x);
+    transcript.append_scalar(b"tau_x", tau_x);
+    transcript.append_scalar(b"myu", myu);
+
+    let w: G::ScalarField = transcript.get_challenge(b"w");
+    let u_prime = params.u * w;
+
+    let ipa_proof = prove_ipa(transcript, l_x, r_x, params.g.clone(), h_prime, u_prime);
 
     Proof {
         A_I,
@@ -285,10 +292,17 @@ pub fn verify<G: CurveGroup>(
         + vec_gen_prod(&f_l, &h_prime) * x);
     let constant_term = vec_gen_prod(&vec_sub(&f_o, &y_pow), &h_prime);
 
+    transcript.append_scalar(b"t_x", proof.t_x);
+    transcript.append_scalar(b"tau_x", proof.tau_x);
+    transcript.append_scalar(b"myu", proof.myu);
+
+    let w: G::ScalarField = transcript.get_challenge(b"w");
+    let u_prime = params.u * w;
+
     let P = proof.A_I * x + proof.A_O * x2 + proof.S * x3 - params.h_b * proof.myu
         + x_public_term
         + constant_term
-        + params.u * proof.t_x;
+        + u_prime * proof.t_x;
 
     verify_ipa(
         transcript,
@@ -296,7 +310,7 @@ pub fn verify<G: CurveGroup>(
         P,
         params.g.clone(),
         h_prime,
-        params.u,
+        u_prime,
     )
 }
 
@@ -420,5 +434,271 @@ mod tests {
         let ok = verify::<G1Projective>(&mats, &instance, &params, &proof, &mut transcript_v);
 
         assert!(!ok, "wrong witness should fail verification");
+    }
+
+    fn honest_proof() -> (
+        ConstraintMatrices<Fr>,
+        Vec<Fr>,
+        ProofParams<G1Projective>,
+        super::Proof<G1Projective>,
+    ) {
+        let (mats, instance, witness, n) = cubic_setup();
+        let params = make_params(n);
+        let mut rng = ark_std::test_rng();
+        let mut transcript_p = Transcript::new(b"r1cs_bp_test");
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &mut transcript_p,
+        );
+        // sanity: the untampered proof verifies
+        let mut transcript_v = Transcript::new(b"r1cs_bp_test");
+        assert!(verify::<G1Projective>(
+            &mats,
+            &instance,
+            &params,
+            &proof,
+            &mut transcript_v
+        ));
+        (mats, instance, params, proof)
+    }
+
+    // ── Negative tests: tamper individual proof fields ─────────────────
+
+    #[test]
+    fn tampered_a_i_fails() {
+        let (mats, instance, params, proof) = honest_proof();
+        let bad = super::Proof {
+            A_I: proof.A_I + proof.S,
+            ..proof
+        };
+        let mut t = Transcript::new(b"r1cs_bp_test");
+        assert!(
+            !verify::<G1Projective>(&mats, &instance, &params, &bad, &mut t),
+            "tampered A_I must be rejected"
+        );
+    }
+
+    #[test]
+    fn tampered_a_o_fails() {
+        let (mats, instance, params, proof) = honest_proof();
+        let bad = super::Proof {
+            A_O: proof.A_O + proof.S,
+            ..proof
+        };
+        let mut t = Transcript::new(b"r1cs_bp_test");
+        assert!(
+            !verify::<G1Projective>(&mats, &instance, &params, &bad, &mut t),
+            "tampered A_O must be rejected"
+        );
+    }
+
+    #[test]
+    fn tampered_s_fails() {
+        let (mats, instance, params, proof) = honest_proof();
+        let bad = super::Proof {
+            S: proof.S + proof.A_I,
+            ..proof
+        };
+        let mut t = Transcript::new(b"r1cs_bp_test");
+        assert!(
+            !verify::<G1Projective>(&mats, &instance, &params, &bad, &mut t),
+            "tampered S must be rejected"
+        );
+    }
+
+    #[test]
+    fn tampered_t_x_fails() {
+        let (mats, instance, params, proof) = honest_proof();
+        let bad = super::Proof {
+            t_x: proof.t_x + Fr::from(1u32),
+            ..proof
+        };
+        let mut t = Transcript::new(b"r1cs_bp_test");
+        assert!(
+            !verify::<G1Projective>(&mats, &instance, &params, &bad, &mut t),
+            "tampered t_x must be rejected"
+        );
+    }
+
+    #[test]
+    fn tampered_tau_x_fails() {
+        let (mats, instance, params, proof) = honest_proof();
+        let bad = super::Proof {
+            tau_x: proof.tau_x + Fr::from(1u32),
+            ..proof
+        };
+        let mut t = Transcript::new(b"r1cs_bp_test");
+        assert!(
+            !verify::<G1Projective>(&mats, &instance, &params, &bad, &mut t),
+            "tampered tau_x must be rejected"
+        );
+    }
+
+    #[test]
+    fn tampered_myu_fails() {
+        let (mats, instance, params, proof) = honest_proof();
+        let bad = super::Proof {
+            myu: proof.myu + Fr::from(1u32),
+            ..proof
+        };
+        let mut t = Transcript::new(b"r1cs_bp_test");
+        assert!(
+            !verify::<G1Projective>(&mats, &instance, &params, &bad, &mut t),
+            "tampered myu must be rejected"
+        );
+    }
+
+    #[test]
+    fn tampered_t1_fails() {
+        let (mats, instance, params, proof) = honest_proof();
+        let bad = super::Proof {
+            T1: proof.T1 + proof.A_I,
+            ..proof
+        };
+        let mut t = Transcript::new(b"r1cs_bp_test");
+        assert!(
+            !verify::<G1Projective>(&mats, &instance, &params, &bad, &mut t),
+            "tampered T1 must be rejected"
+        );
+    }
+
+    #[test]
+    fn tampered_ipa_a_final_fails() {
+        let (mats, instance, params, proof) = honest_proof();
+        let bad_ipa = crate::IpaProof {
+            l_vec: proof.ipa_proof.l_vec.clone(),
+            r_vec: proof.ipa_proof.r_vec.clone(),
+            a_final: proof.ipa_proof.a_final + Fr::from(1u32),
+            b_final: proof.ipa_proof.b_final,
+        };
+        let bad = super::Proof {
+            ipa_proof: bad_ipa,
+            ..proof
+        };
+        let mut t = Transcript::new(b"r1cs_bp_test");
+        assert!(
+            !verify::<G1Projective>(&mats, &instance, &params, &bad, &mut t),
+            "tampered IPA a_final must be rejected"
+        );
+    }
+
+    #[test]
+    fn wrong_transcript_label_fails() {
+        let (mats, instance, witness, n) = cubic_setup();
+        let params = make_params(n);
+        let mut rng = ark_std::test_rng();
+
+        let mut transcript_p = Transcript::new(b"r1cs_bp_test");
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &mut transcript_p,
+        );
+
+        // Verifier uses a different transcript label
+        let mut transcript_v = Transcript::new(b"WRONG_LABEL");
+        let ok = verify::<G1Projective>(&mats, &instance, &params, &proof, &mut transcript_v);
+        assert!(!ok, "mismatched transcript label must fail");
+    }
+
+    // ── Bigger circuit test: PowerCircuit with ~63 constraints ─────────
+
+    #[test]
+    fn power_circuit_63_constraints() {
+        use crate::circuit_bench::PowerCircuit;
+
+        let num_mults = 63;
+        let x_val = Fr::from(2u32);
+        let mut y_val = x_val;
+        for _ in 0..num_mults {
+            y_val *= x_val;
+        }
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let circuit = PowerCircuit {
+            x: Some(x_val),
+            y: y_val,
+            num_mults,
+        };
+        circuit.generate_constraints(cs.clone()).unwrap();
+        cs.finalize();
+        assert!(cs.is_satisfied().unwrap());
+
+        let mats = cs.to_matrices().unwrap();
+        let b = cs.borrow().unwrap();
+        let instance = b.instance_assignment.clone();
+        let witness = b.witness_assignment.clone();
+        drop(b);
+
+        let n = (mats.num_constraints + mats.num_witness_variables).next_power_of_two();
+        let params = make_params(n);
+        let mut rng = ark_std::test_rng();
+
+        let mut transcript_p = Transcript::new(b"r1cs_bp_test");
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &mut transcript_p,
+        );
+
+        let mut transcript_v = Transcript::new(b"r1cs_bp_test");
+        let ok = verify::<G1Projective>(&mats, &instance, &params, &proof, &mut transcript_v);
+        assert!(ok, "PowerCircuit(63) honest proof must verify");
+    }
+
+    #[test]
+    fn power_circuit_255_constraints() {
+        use crate::circuit_bench::PowerCircuit;
+
+        let num_mults = 255;
+        let x_val = Fr::from(2u32);
+        let mut y_val = x_val;
+        for _ in 0..num_mults {
+            y_val *= x_val;
+        }
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let circuit = PowerCircuit {
+            x: Some(x_val),
+            y: y_val,
+            num_mults,
+        };
+        circuit.generate_constraints(cs.clone()).unwrap();
+        cs.finalize();
+        assert!(cs.is_satisfied().unwrap());
+
+        let mats = cs.to_matrices().unwrap();
+        let b = cs.borrow().unwrap();
+        let instance = b.instance_assignment.clone();
+        let witness = b.witness_assignment.clone();
+        drop(b);
+
+        let n = (mats.num_constraints + mats.num_witness_variables).next_power_of_two();
+        let params = make_params(n);
+        let mut rng = ark_std::test_rng();
+
+        let mut transcript_p = Transcript::new(b"r1cs_bp_test");
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &mut transcript_p,
+        );
+
+        let mut transcript_v = Transcript::new(b"r1cs_bp_test");
+        let ok = verify::<G1Projective>(&mats, &instance, &params, &proof, &mut transcript_v);
+        assert!(ok, "PowerCircuit(255) honest proof must verify");
     }
 }

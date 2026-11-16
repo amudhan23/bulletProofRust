@@ -28,6 +28,7 @@ pub trait TranscriptProtocol {
     fn dom_sep(&mut self, n: u64);
     fn append_point<G: CurveGroup>(&mut self, label: &'static [u8], point: &G);
     fn get_challenge<F: PrimeField>(&mut self, label: &'static [u8]) -> F;
+    fn append_scalar<F: PrimeField>(&mut self, label: &'static [u8], scalar: F);
 }
 
 impl TranscriptProtocol for Transcript {
@@ -39,6 +40,14 @@ impl TranscriptProtocol for Transcript {
     fn append_point<G: CurveGroup>(&mut self, label: &'static [u8], point: &G) {
         let mut bytes = Vec::new();
         point
+            .serialize_compressed(&mut bytes)
+            .expect("Serialization failed");
+        self.append_message(label, &bytes);
+    }
+
+    fn append_scalar<F: PrimeField>(&mut self, label: &'static [u8], scalar: F) {
+        let mut bytes = Vec::new();
+        scalar
             .serialize_compressed(&mut bytes)
             .expect("Serialization failed");
         self.append_message(label, &bytes);
@@ -292,7 +301,7 @@ fn hash_to_generator<G: CurveGroup>(domain: &[u8], index: u64) -> G {
     unreachable!()
 }
 
-pub fn setup<G: CurveGroup, R: ark_std::rand::Rng>(n_pad: usize, rng: &mut R) -> R1csIpaParams<G> {
+pub fn setup<G: CurveGroup>(n_pad: usize) -> R1csIpaParams<G> {
     assert!(n_pad.is_power_of_two());
     let two_n = 2 * n_pad;
     let g_vec: Vec<G> = (0..two_n)
@@ -525,7 +534,7 @@ fn test_sha256() {
 
     println!(" Generating parameters...");
     let setup_start = Instant::now();
-    let params = setup::<G1Projective, _>(n_pad, &mut rng);
+    let params = setup::<G1Projective>(n_pad);
     println!(" Setup: {:.2} s", setup_start.elapsed().as_secs_f64());
 
     println!(" Proving...");
@@ -585,7 +594,7 @@ fn benchmark() {
 
         let actual_constraints = cs.num_constraints();
         let n_pad = actual_constraints.next_power_of_two().max(2);
-        let params = setup::<G1Projective, _>(n_pad, &mut rng);
+        let params = setup::<G1Projective>(n_pad);
 
         let _ = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
 
@@ -662,7 +671,7 @@ fn main() {
     let n_pad = cs.num_constraints().next_power_of_two().max(2);
     println!(" n_pad :          {} ", n_pad);
 
-    let params = setup::<G1Projective, _>(n_pad, &mut rng);
+    let params = setup::<G1Projective>(n_pad);
 
     let proof = prove_r1cs::<G1Projective, _>(cs.clone(), &params, &mut rng);
     println!("  IPA recusrion : {} rounds", proof.ipa.l_vec.len());
