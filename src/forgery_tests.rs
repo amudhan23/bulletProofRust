@@ -30,7 +30,7 @@ fn forgery_wrong_statement_accepted() {
     let cs = cubic_cs(4, 73);
     assert!(cs.is_satisfied().unwrap());
     let n_pad = cubic_cs(3, 35).num_constraints().next_power_of_two().max(2);
-    let params = setup::<G1Projective, _>(n_pad, &mut rng);
+    let params = setup::<G1Projective>(n_pad);
     let proof = prove_r1cs::<G1Projective, _>(cs, &params, &mut rng);
     assert!(verify_r1cs::<G1Projective>(&params, &proof));
 }
@@ -39,7 +39,7 @@ fn forgery_wrong_statement_accepted() {
 fn forgery_wrong_circuit_accepted() {
     let mut rng = ark_std::test_rng();
     let n_pad = cubic_cs(3, 35).num_constraints().next_power_of_two().max(2);
-    let params = setup::<G1Projective, _>(n_pad, &mut rng);
+    let params = setup::<G1Projective>(n_pad);
 
     let cs = square_cs(4, 26);
     assert!(cs.is_satisfied().unwrap());

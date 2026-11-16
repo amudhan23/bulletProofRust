@@ -701,4 +701,193 @@ mod tests {
         let ok = verify::<G1Projective>(&mats, &instance, &params, &proof, &mut transcript_v);
         assert!(ok, "PowerCircuit(255) honest proof must verify");
     }
+
+    // ── Soundness: planting a U-component in A_O must not forge a proof ──
+    //
+    // A prover with an invalid witness can know its gate-0 error Δ before any
+    // challenge (gate 0 has weight y^0 = 1). Before the w-randomization of u in
+    // the IPA, adding Δ·U to A_O cancelled the x²·Δ gap and the forgery verified.
+    // `malicious_prove` is the real prover plus that single extra line.
+
+    use super::*;
+
+    fn malicious_prove<G: CurveGroup>(
+        gate0_violation: G::ScalarField,
+        mats: &ConstraintMatrices<G::ScalarField>,
+        instance: &[G::ScalarField],
+        witness: &[G::ScalarField],
+        params: &ProofParams<G>,
+        rng: &mut impl Rng,
+        transcript: &mut Transcript,
+    ) -> Proof<G> {
+        let ac = ArithCircuit::convert_to_wiring_constraint(mats, instance);
+        let mut z = instance.to_vec();
+        z.extend_from_slice(witness);
+        let (mut a_l, mut a_r, mut a_o) = assign::<G>(mats, &z);
+        a_l.resize(params.n, G::ScalarField::zero());
+        a_r.resize(params.n, G::ScalarField::zero());
+        a_o.resize(params.n, G::ScalarField::zero());
+
+        let alpha = G::ScalarField::rand(rng);
+        let beta = G::ScalarField::rand(rng);
+        let gamma = G::ScalarField::rand(rng);
+        let A_I = commit_two_vectors(&a_l, &a_r, &params.g, &params.h, alpha, params.h_b);
+        let A_O = commit_vector(&a_o, &params.g, beta, params.h_b);
+        // ATTACK: smuggle a U-component into A_O to cancel the gate-0 violation
+        let A_O = A_O + params.u * gate0_violation;
+
+        let s_l: Vec<G::ScalarField> = (0..params.n).map(|_| G::ScalarField::rand(rng)).collect();
+        let s_r: Vec<G::ScalarField> = (0..params.n).map(|_| G::ScalarField::rand(rng)).collect();
+        let S = commit_two_vectors(&s_l, &s_r, &params.g, &params.h, gamma, params.h_b);
+        transcript.append_point(b"Com_A_I", &A_I);
+        transcript.append_point(b"Com_A_O", &A_O);
+        transcript.append_point(b"Com_S", &S);
+
+        let y: G::ScalarField = transcript.get_challenge(b"y");
+        let z_chal: G::ScalarField = transcript.get_challenge(b"z");
+
+        let q = 3 * ac.num_constraints + ac.num_witness_variables;
+
+        let z_chal_powers = powers_of_starts_base(z_chal, q);
+
+        let (f_l, f_r, f_o, _, k_c) = ac.convert_to_f_vectors(&z_chal_powers);
+
+        let y_inv = y.inverse().unwrap();
+        let y_pow = powers_of(y, params.n);
+        let y_pow_inv = powers_of(y_inv, params.n);
+
+        let l1 = vec_add(&a_l, &hadamard::<G>(&y_pow_inv, &f_r));
+        let l2 = a_o.clone();
+        let l3 = s_l.clone();
+
+        let r1 = vec_sub(&f_o, &y_pow);
+        let r2 = vec_add(&hadamard::<G>(&y_pow, &a_r), &f_l);
+        let r3 = hadamard::<G>(&y_pow, &s_r);
+
+        let t1 = inner_product::<G>(&l1, &r1);
+        let t3 = inner_product::<G>(&l2, &r2) + inner_product::<G>(&l3, &r1);
+        let t4 = inner_product::<G>(&l3, &r2) + inner_product::<G>(&l1, &r3);
+        let t5 = inner_product::<G>(&l2, &r3);
+        let t6 = inner_product::<G>(&l3, &r3);
+
+        let delta_1 = G::ScalarField::rand(rng);
+        let delta_3 = G::ScalarField::rand(rng);
+        let delta_4 = G::ScalarField::rand(rng);
+        let delta_5 = G::ScalarField::rand(rng);
+        let delta_6 = G::ScalarField::rand(rng);
+
+        let T1 = commit_scalar(t1, params.u, delta_1, params.h_b);
+        let T3 = commit_scalar(t3, params.u, delta_3, params.h_b);
+        let T4 = commit_scalar(t4, params.u, delta_4, params.h_b);
+        let T5 = commit_scalar(t5, params.u, delta_5, params.h_b);
+        let T6 = commit_scalar(t6, params.u, delta_6, params.h_b);
+
+        transcript.append_point(b"T1", &T1);
+        transcript.append_point(b"T3", &T3);
+        transcript.append_point(b"T4", &T4);
+        transcript.append_point(b"T5", &T5);
+        transcript.append_point(b"T6", &T6);
+
+        let x: G::ScalarField = transcript.get_challenge(b"x");
+
+        let delta = delta(y, &f_l, &f_r);
+
+        let x2 = x * x;
+        let x3 = x2 * x;
+        let x4 = x3 * x;
+        let x5 = x4 * x;
+        let x6 = x5 * x;
+
+        let t_x = x * t1 + x2 * (k_c + delta) + x3 * t3 + x4 * t4 + x5 * t5 + x6 * t6;
+        let tau_x = x * delta_1 + x3 * delta_3 + x4 * delta_4 + x5 * delta_5 + x6 * delta_6;
+
+        let myu = x * alpha + x2 * beta + x3 * gamma;
+
+        let l_x: Vec<G::ScalarField> = vec_add(
+            &vec_add(
+                &scalar_vector_mul::<G>(x, &l1),
+                &scalar_vector_mul::<G>(x2, &l2),
+            ),
+            &scalar_vector_mul::<G>(x3, &l3),
+        );
+        // let r_x = r1 + scalar_vector_mul(x, &r2) + scalar_vector_mul(x3, &r3);
+
+        let r_x: Vec<G::ScalarField> = vec_add(
+            &vec_add(&r1, &scalar_vector_mul::<G>(x, &r2)),
+            &scalar_vector_mul::<G>(x3, &r3),
+        );
+
+        let h_prime: Vec<G> = params
+            .h
+            .iter()
+            .zip(y_pow_inv.iter())
+            .map(|(h, y)| *h * *y)
+            .collect();
+
+        transcript.append_scalar(b"t_x", t_x);
+        transcript.append_scalar(b"tau_x", tau_x);
+        transcript.append_scalar(b"myu", myu);
+
+        let w: G::ScalarField = transcript.get_challenge(b"w");
+        let u_prime = params.u * w;
+
+        let ipa_proof = prove_ipa(transcript, l_x, r_x, params.g.clone(), h_prime, u_prime);
+
+        Proof {
+            A_I,
+            A_O,
+            S,
+            tau_x,
+            myu,
+            T1,
+            T3,
+            T4,
+            T5,
+            T6,
+            t_x,
+            ipa_proof,
+        }
+    }
+
+    /// Circuit x*x = y with y = 9 public, but witness x = 2: constraint 0 is FALSE.
+    fn false_square_setup() -> (ConstraintMatrices<Fr>, Vec<Fr>, Vec<Fr>, usize) {
+        use ark_relations::lc;
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let y = cs.new_input_variable(|| Ok(Fr::from(9u64))).unwrap();
+        let x = cs.new_witness_variable(|| Ok(Fr::from(2u64))).unwrap();
+        cs.enforce_constraint(lc!() + x, lc!() + x, lc!() + y).unwrap();
+        cs.finalize();
+        assert!(!cs.is_satisfied().unwrap(), "witness should be invalid");
+        let mats = cs.to_matrices().unwrap();
+        let b = cs.borrow().unwrap();
+        let n = (mats.num_constraints + mats.num_witness_variables).next_power_of_two();
+        (mats, b.instance_assignment.clone(), b.witness_assignment.clone(), n)
+    }
+
+    #[test]
+    fn honest_prover_with_false_witness_is_rejected() {
+        let (mats, instance, witness, n) = false_square_setup();
+        let params = make_params(n);
+        let mut rng = ark_std::test_rng();
+        let mut tp = Transcript::new(b"r1cs_bp_test");
+        let proof = prove::<G1Projective>(&mats, &instance, &witness, &params, &mut rng, &mut tp);
+        let mut tv = Transcript::new(b"r1cs_bp_test");
+        assert!(!verify::<G1Projective>(&mats, &instance, &params, &proof, &mut tv));
+    }
+
+    #[test]
+    fn planted_u_component_in_a_o_is_rejected() {
+        let (mats, instance, witness, n) = false_square_setup();
+        let params = make_params(n);
+        let mut rng = ark_std::test_rng();
+        // gate 0: a_L*a_R - a_O = 2*2 - 9 = -5, independent of all challenges
+        let violation = Fr::from(4u64) - Fr::from(9u64);
+        let mut tp = Transcript::new(b"r1cs_bp_test");
+        let proof = malicious_prove::<G1Projective>(
+            violation, &mats, &instance, &witness, &params, &mut rng, &mut tp,
+        );
+        let mut tv = Transcript::new(b"r1cs_bp_test");
+        let accepted = verify::<G1Projective>(&mats, &instance, &params, &proof, &mut tv);
+        assert!(!accepted, "FORGERY: verifier accepted a proof for x*x = 9 with x = 2");
+    }
 }
