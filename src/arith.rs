@@ -206,7 +206,7 @@ mod tests {
         let (mats, instance, witness) = setup();
         let mut z = instance.clone();
         z.extend(witness.iter().cloned());
-        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance);
+        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance, &[]);
         let (mut a_l, mut a_r, mut a_o) = (
             matvec(&mats.a, &z),
             matvec(&mats.b, &z),
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn wrong_witness_breaks_wiring() {
         let (mats, instance, mut witness) = setup();
-        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance);
+        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance, &[]);
         witness[0] += Fr::from(1u32);
         let mut z_bad = instance.clone();
         z_bad.extend(witness.iter().cloned());
@@ -307,7 +307,7 @@ mod more_tests {
         let mut z = instance.clone();
         z.extend(witness.iter().cloned());
         let honest = |inst: &[Fr]| {
-            let ac = ArithCircuit::convert_to_wiring_constraint(&mats, inst);
+            let ac = ArithCircuit::convert_to_wiring_constraint(&mats, inst, &[]);
             let mv = |m: &ark_relations::r1cs::Matrix<Fr>| -> Vec<Fr> {
                 m.iter()
                     .map(|row| row.iter().map(|(c, j)| *c * z[*j]).sum())
@@ -377,7 +377,7 @@ mod sha_tests {
         z.extend(witness.iter().cloned());
 
         let t = std::time::Instant::now();
-        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance);
+        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance, &[]);
         println!("convert: {:?}", t.elapsed());
         println!(
             "n={} rows={} instance={} witness(m)={} nnz(W_V)={}",
@@ -470,7 +470,7 @@ mod t2_tests {
         let mut z = instance.clone();
         z.extend(witness.iter().cloned());
 
-        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance);
+        let ac = ArithCircuit::convert_to_wiring_constraint(&mats, &instance, &[]);
         let n = (ac.num_constraints + ac.num_witness_variables).next_power_of_two();
         let q = ac.c_pub.len();
 
