@@ -64,6 +64,10 @@ pub fn inner_product<G: CurveGroup>(a: &[G::ScalarField], b: &[G::ScalarField]) 
     a.iter().zip(b.iter()).map(|(a_i, b_i)| *a_i * *b_i).sum()
 }
 
+pub fn inner_product_scalar_generator<G: CurveGroup>(a: &[G::ScalarField], b: &[G]) -> G {
+    a.iter().zip(b.iter()).map(|(a_i, b_i)| *b_i * *a_i).sum()
+}
+
 pub fn hadamard<G: CurveGroup>(a: &[G::ScalarField], b: &[G::ScalarField]) -> Vec<G::ScalarField> {
     a.iter().zip(b.iter()).map(|(x, y)| *x * *y).collect()
 }

@@ -8,7 +8,7 @@ use ark_std::rand::Rng;
 use ark_std::{One, UniformRand, Zero};
 use merlin::Transcript;
 
-use crate::{IpaProof, prove_ipa, verify_ipa};
+use crate::{IpaProof, inner_product_scalar_generator, prove_ipa, verify_ipa};
 use crate::{
     ProofParams, TranscriptProtocol,
     arith::{ArithCircuit, assign, delta},
@@ -98,9 +98,22 @@ pub fn prove<G: CurveGroup>(
     witness: &[G::ScalarField],
     params: &ProofParams<G>,
     rng: &mut impl Rng,
+    commited: &[usize],
+    v_gammas: &[G::ScalarField],
     transcript: &mut Transcript,
 ) -> Proof<G> {
-    let ac = ArithCircuit::convert_to_wiring_constraint(mats, instance);
+    let ac = ArithCircuit::convert_to_wiring_constraint(mats, instance, &commited);
+
+    let mut v_vals: Vec<G::ScalarField> = Vec::new();
+    let mut V = Vec::new();
+
+    for j in 0..commited.len() {
+        v_vals.push(witness[commited[j]]);
+        let v_commit = params.u * v_vals[j] + params.h_b * v_gammas[j];
+        transcript.append_point(b"V", &v_commit);
+        V.push(v_commit);
+    }
+
     let mut z = instance.to_vec();
     z.extend_from_slice(witness);
     let (mut a_l, mut a_r, mut a_o) = assign::<G>(mats, &z);
@@ -124,11 +137,11 @@ pub fn prove<G: CurveGroup>(
     let y: G::ScalarField = transcript.get_challenge(b"y");
     let z_chal: G::ScalarField = transcript.get_challenge(b"z");
 
-    let q = 3 * ac.num_constraints + ac.num_witness_variables;
+    let q = ac.w_l.len();
 
     let z_chal_powers = powers_of_starts_base(z_chal, q);
 
-    let (f_l, f_r, f_o, _, k_c) = ac.convert_to_f_vectors(&z_chal_powers);
+    let (f_l, f_r, f_o, f_v, k_c) = ac.convert_to_f_vectors(&z_chal_powers);
 
     let y_inv = y.inverse().unwrap();
     let y_pow = powers_of(y, params.n);
@@ -166,6 +179,9 @@ pub fn prove<G: CurveGroup>(
     transcript.append_point(b"T5", &T5);
     transcript.append_point(b"T6", &T6);
 
+    let fv_v = inner_product::<G>(&f_v, &v_vals);
+    let fv_gamma = inner_product::<G>(&f_v, &v_gammas);
+
     let x: G::ScalarField = transcript.get_challenge(b"x");
 
     let delta = delta(y, &f_l, &f_r);
@@ -176,8 +192,9 @@ pub fn prove<G: CurveGroup>(
     let x5 = x4 * x;
     let x6 = x5 * x;
 
-    let t_x = x * t1 + x2 * (k_c + delta) + x3 * t3 + x4 * t4 + x5 * t5 + x6 * t6;
-    let tau_x = x * delta_1 + x3 * delta_3 + x4 * delta_4 + x5 * delta_5 + x6 * delta_6;
+    let t_x = x * t1 + x2 * (k_c + delta + fv_v) + x3 * t3 + x4 * t4 + x5 * t5 + x6 * t6;
+    let tau_x =
+        x * delta_1 + x3 * delta_3 + x4 * delta_4 + x5 * delta_5 + x6 * delta_6 + x2 * fv_gamma;
 
     let myu = x * alpha + x2 * beta + x3 * gamma;
 
@@ -231,10 +248,16 @@ pub fn verify<G: CurveGroup>(
     mats: &ConstraintMatrices<G::ScalarField>,
     instance: &[G::ScalarField],
     params: &ProofParams<G>,
+    commited: &[usize],
+    v_commitments: &[G],
     proof: &Proof<G>,
     transcript: &mut Transcript,
 ) -> bool {
-    let ac = ArithCircuit::convert_to_wiring_constraint(mats, instance);
+    let ac = ArithCircuit::convert_to_wiring_constraint(mats, instance, &commited);
+
+    for V in v_commitments {
+        transcript.append_point(b"V", V);
+    }
 
     transcript.append_point(b"Com_A_I", &proof.A_I);
     transcript.append_point(b"Com_A_O", &proof.A_O);
@@ -243,11 +266,11 @@ pub fn verify<G: CurveGroup>(
     let y: G::ScalarField = transcript.get_challenge(b"y");
     let z_chal: G::ScalarField = transcript.get_challenge(b"z");
 
-    let q = 3 * ac.num_constraints + ac.num_witness_variables;
+    let q = ac.w_l.len();
 
     let z_chal_powers = powers_of_starts_base(z_chal, q);
 
-    let (f_l, f_r, f_o, _, k_c) = ac.convert_to_f_vectors(&z_chal_powers);
+    let (f_l, f_r, f_o, f_v, k_c) = ac.convert_to_f_vectors(&z_chal_powers);
 
     let y_inv = y.inverse().unwrap();
     let y_pow = powers_of(y, params.n);
@@ -268,10 +291,13 @@ pub fn verify<G: CurveGroup>(
     let x4 = x3 * x;
     let x5 = x4 * x;
     let x6 = x5 * x;
+    let fv_v_commitment = inner_product_scalar_generator(&f_v, v_commitments);
 
+    //check 1
     let t_lhs = params.u * proof.t_x + params.h_b * proof.tau_x;
     let t_rhs = proof.T1 * x
         + params.u * x2 * (delta + k_c)
+        + (fv_v_commitment) * x2
         + proof.T3 * x3
         + proof.T4 * x4
         + proof.T5 * x5
@@ -855,13 +881,19 @@ mod tests {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let y = cs.new_input_variable(|| Ok(Fr::from(9u64))).unwrap();
         let x = cs.new_witness_variable(|| Ok(Fr::from(2u64))).unwrap();
-        cs.enforce_constraint(lc!() + x, lc!() + x, lc!() + y).unwrap();
+        cs.enforce_constraint(lc!() + x, lc!() + x, lc!() + y)
+            .unwrap();
         cs.finalize();
         assert!(!cs.is_satisfied().unwrap(), "witness should be invalid");
         let mats = cs.to_matrices().unwrap();
         let b = cs.borrow().unwrap();
         let n = (mats.num_constraints + mats.num_witness_variables).next_power_of_two();
-        (mats, b.instance_assignment.clone(), b.witness_assignment.clone(), n)
+        (
+            mats,
+            b.instance_assignment.clone(),
+            b.witness_assignment.clone(),
+            n,
+        )
     }
 
     #[test]
@@ -872,7 +904,9 @@ mod tests {
         let mut tp = Transcript::new(b"r1cs_bp_test");
         let proof = prove::<G1Projective>(&mats, &instance, &witness, &params, &mut rng, &mut tp);
         let mut tv = Transcript::new(b"r1cs_bp_test");
-        assert!(!verify::<G1Projective>(&mats, &instance, &params, &proof, &mut tv));
+        assert!(!verify::<G1Projective>(
+            &mats, &instance, &params, &proof, &mut tv
+        ));
     }
 
     #[test]
@@ -888,6 +922,9 @@ mod tests {
         );
         let mut tv = Transcript::new(b"r1cs_bp_test");
         let accepted = verify::<G1Projective>(&mats, &instance, &params, &proof, &mut tv);
-        assert!(!accepted, "FORGERY: verifier accepted a proof for x*x = 9 with x = 2");
+        assert!(
+            !accepted,
+            "FORGERY: verifier accepted a proof for x*x = 9 with x = 2"
+        );
     }
 }

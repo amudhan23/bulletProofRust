@@ -1,3 +1,5 @@
+use core::num;
+
 use ark_bls12_381::Fr;
 use ark_crypto_primitives::crh::bowe_hopwood::constraints;
 use ark_ec::CurveGroup;
@@ -80,6 +82,8 @@ impl<F: PrimeField> ArithCircuit<F> {
             for &(gate, coeff) in &self.w_o[q] {
                 f_o[gate] += coeff * z_pows[q];
             }
+            /// this is not a gate for f_v, write a better explanation later, it is the first index of the commitment.
+            /// so bookkeeping for the commitments is different from the other f's.
             for &(gate, coeff) in &self.w_v[q] {
                 f_v[gate] += coeff * z_pows[q];
             }
@@ -90,16 +94,20 @@ impl<F: PrimeField> ArithCircuit<F> {
         (f_l, f_r, f_o, f_v, f_c)
     }
 
-    pub fn convert_to_wiring_constraint(mats: &ConstraintMatrices<F>, instance: &[F]) -> Self {
+    pub fn convert_to_wiring_constraint(
+        mats: &ConstraintMatrices<F>,
+        instance: &[F],
+        committed: &[usize],
+    ) -> Self {
         let num_constraints = mats.num_constraints;
         let num_witness_variables = mats.num_witness_variables;
         let num_instance_variables = mats.num_instance_variables;
-        let total_rows = 3 * num_constraints + num_witness_variables;
+        let total_rows = 3 * num_constraints + num_witness_variables + committed.len();
 
         let mut w_l: Vec<SparseRow<F>> = vec![Vec::new(); total_rows];
         let mut w_r: Vec<SparseRow<F>> = vec![Vec::new(); total_rows];
         let mut w_o: Vec<SparseRow<F>> = vec![Vec::new(); total_rows];
-        let w_v: Vec<SparseRow<F>> = vec![Vec::new(); total_rows];
+        let mut w_v: Vec<SparseRow<F>> = vec![Vec::new(); total_rows];
         let mut c_pub: Vec<F> = vec![F::zero(); total_rows];
 
         for i in 0..num_constraints {
@@ -124,6 +132,12 @@ impl<F: PrimeField> ArithCircuit<F> {
             let row = 3 * num_constraints + j;
             w_r[row].push((num_constraints + j, F::one()));
             c_pub[row] = F::one();
+        }
+
+        for j in 0..committed.len() {
+            let row = 3 * num_constraints + num_witness_variables + j;
+            w_l[row].push((num_constraints + committed[j], F::one()));
+            w_v[row].push((j, F::one()));
         }
 
         Self {
