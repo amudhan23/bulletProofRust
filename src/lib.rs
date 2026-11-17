@@ -323,11 +323,10 @@ pub fn setup<G: CurveGroup>(n_pad: usize) -> R1csIpaParams<G> {
 
 pub fn setup_params<G: CurveGroup>(n: usize) -> ProofParams<G> {
     assert!(n.is_power_of_two());
-    let two_n = 2 * n;
-    let g: Vec<G> = (0..two_n)
+    let g: Vec<G> = (0..n)
         .map(|i| hash_to_generator::<G>(b"bulletproof_v1/g", i as u64))
         .collect();
-    let h: Vec<G> = (0..two_n)
+    let h: Vec<G> = (0..n)
         .map(|i| hash_to_generator::<G>(b"bulletproof_v1/h", i as u64))
         .collect();
     let u = hash_to_generator::<G>(b"bulletproof_v1/u", 0);
