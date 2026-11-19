@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::vec;
 
 use ark_bls12_381::Fr;
@@ -9,7 +10,7 @@ use ark_std::rand::Rng;
 use ark_std::{One, UniformRand, Zero};
 use merlin::Transcript;
 
-use crate::{IpaProof, inner_product_scalar_generator, prove_ipa, verify_ipa};
+use crate::{verify_ipa_msm, IpaProof, inner_product_scalar_generator, prove_ipa, verify_ipa};
 use crate::{
     ProofParams, TranscriptProtocol,
     arith::{ArithCircuit, assign, delta},
@@ -218,8 +219,8 @@ pub fn prove<G: CurveGroup>(
 
     let h_prime: Vec<G> = params
         .h
-        .iter()
-        .zip(y_pow_inv.iter())
+        .par_iter()
+        .zip(y_pow_inv.par_iter())
         .map(|(h, y)| *h * *y)
         .collect();
 
@@ -311,16 +312,11 @@ pub fn verify<G: CurveGroup>(
         return false;
     }
 
-    let h_prime: Vec<G> = params
-        .h
-        .iter()
-        .zip(y_pow_inv.iter())
-        .map(|(h, y)| *h * *y)
-        .collect();
-
-    let x_public_term = (vec_gen_prod(&vecs_hadamard_prod(&y_pow_inv, &f_r), &params.g) * x
-        + vec_gen_prod(&f_l, &h_prime) * x);
-    let constant_term = vec_gen_prod(&vec_sub(&f_o, &y_pow), &h_prime);
+    // h'_i = y^{-i}·h_i is never built: the y^{-i} factors go into the scalars.
+    let x_public_term = vec_gen_prod(&vecs_hadamard_prod(&y_pow_inv, &f_r), &params.g) * x
+        + vec_gen_prod(&vecs_hadamard_prod(&f_l, &y_pow_inv), &params.h) * x;
+    let constant_term =
+        vec_gen_prod(&vecs_hadamard_prod(&vec_sub(&f_o, &y_pow), &y_pow_inv), &params.h);
 
     transcript.append_scalar(b"t_x", proof.t_x);
     transcript.append_scalar(b"tau_x", proof.tau_x);
@@ -334,12 +330,13 @@ pub fn verify<G: CurveGroup>(
         + constant_term
         + u_prime * proof.t_x;
 
-    verify_ipa(
+    verify_ipa_msm(
         transcript,
         &proof.ipa_proof,
         P,
-        params.g.clone(),
-        h_prime,
+        &params.g,
+        &params.h,
+        &y_pow_inv,
         u_prime,
     )
 }

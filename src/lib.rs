@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ec::AffineRepr;
 use ark_ec::CurveGroup;
@@ -164,14 +165,15 @@ pub fn prove_ipa<G: CurveGroup>(
             .zip(b_r.iter())
             .map(|(bl, br)| *bl * x_inv + *br * x)
             .collect();
+        // Fold the generators in parallel (each element is independent).
         let g_prime: Vec<_> = g_l
-            .iter()
-            .zip(g_r.iter())
+            .par_iter()
+            .zip(g_r.par_iter())
             .map(|(gl, gr)| *gl * x_inv + *gr * x)
             .collect();
         let h_prime: Vec<_> = h_l
-            .iter()
-            .zip(h_r.iter())
+            .par_iter()
+            .zip(h_r.par_iter())
             .map(|(hl, hr)| *hl * x + *hr * x_inv)
             .collect();
 
@@ -237,6 +239,76 @@ pub fn verify_ipa<G: CurveGroup>(
     let expected_c = g_vec[0] * a + h_vec[0] * b + u * c;
 
     commitment == expected_c
+}
+
+/// The same check as `verify_ipa`, without folding any generators.
+///
+/// After k rounds the folded generators are  g = Σ s_i·g_i  and  h = Σ s_i⁻¹·h'_i,
+/// where s_i = Π_j x_j^{±1} (+1 if bit j of i, counted from the MSB, is 1).
+/// With h'_i = h_scale[i]·h_i, the whole check becomes MSMs over the original
+/// generators:  P + Σ x_j²L_j + Σ x_j⁻²R_j  ==  ⟨a·s, g⟩ + ⟨b·s⁻¹∘h_scale, h⟩ + ab·u.
+/// Written with AI assistance (Claude).
+pub fn verify_ipa_msm<G: CurveGroup>(
+    transcript: &mut Transcript,
+    proof: &IpaProof<G>,
+    commitment: G,
+    g_vec: &[G],
+    h_vec: &[G],
+    h_scale: &[G::ScalarField],
+    u: G,
+) -> bool {
+    let n = g_vec.len();
+    let k = proof.l_vec.len();
+    if n != 1 << k || h_vec.len() < n || h_scale.len() < n || proof.r_vec.len() != k {
+        return false;
+    }
+
+    // Replay the transcript to get the challenges.
+    let mut xs = Vec::with_capacity(k);
+    for (l, r) in proof.l_vec.iter().zip(proof.r_vec.iter()) {
+        transcript.append_point(b"L", l);
+        transcript.append_point(b"R", r);
+        xs.push(transcript.get_challenge::<G::ScalarField>(b"x"));
+    }
+    let mut x_invs = xs.clone();
+    ark_ff::batch_inversion(&mut x_invs);
+
+    // s_i and s_i⁻¹ from the bits of i (round j looks at bit k-1-j).
+    let s: Vec<G::ScalarField> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut acc = G::ScalarField::one();
+            for j in 0..k {
+                acc *= if (i >> (k - 1 - j)) & 1 == 1 { xs[j] } else { x_invs[j] };
+            }
+            acc
+        })
+        .collect();
+    let mut s_inv = s.clone();
+    ark_ff::batch_inversion(&mut s_inv);
+
+    let a = proof.a_final;
+    let b = proof.b_final;
+    let g_scalars: Vec<G::ScalarField> = s.iter().map(|si| a * si).collect();
+    let h_scalars: Vec<G::ScalarField> = s_inv
+        .iter()
+        .zip(h_scale)
+        .map(|(si, hs)| b * si * hs)
+        .collect();
+
+    let lhs = commitment
+        + pedersen_vec(
+            &xs.iter().map(|x| x.square()).collect::<Vec<_>>(),
+            &proof.l_vec,
+        )
+        + pedersen_vec(
+            &x_invs.iter().map(|x| x.square()).collect::<Vec<_>>(),
+            &proof.r_vec,
+        );
+    let rhs = pedersen_vec(&g_scalars, &g_vec[..n])
+        + pedersen_vec(&h_scalars, &h_vec[..n])
+        + u * (a * b);
+    lhs == rhs
 }
 
 // fn pederson_commitment<G: CurveGroup>(a:&[G::ScalarField], b:&[G::ScalarField], g_vec: &[G], h_vec: &[G], u:G) -> G{
