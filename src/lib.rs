@@ -102,8 +102,9 @@ pub fn pad_zero<F: Field>(mut v: Vec<F>, new_len: usize) -> Vec<F> {
 }
 
 pub fn pedersen_vec<G: CurveGroup>(a: &[G::ScalarField], g_vec: &[G]) -> G {
-    debug_assert_eq!(a.len(), g_vec.len());
-    a.iter().zip(g_vec).map(|(s, p)| *p * *s).sum()
+    let m = a.len().min(g_vec.len()); // keep zip's "stop at the shorter" behavior
+    let bases = G::normalize_batch(&g_vec[..m]); // projective → affine, which msm wants
+    G::msm(&bases, &a[..m]).unwrap()
 }
 
 pub fn pedersen_with_ip<G: CurveGroup>(

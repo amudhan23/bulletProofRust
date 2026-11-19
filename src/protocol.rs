@@ -2,6 +2,7 @@ use std::vec;
 
 use ark_bls12_381::Fr;
 use ark_ec::CurveGroup;
+use ark_ec::VariableBaseMSM;
 use ark_ff::{Field, PrimeField};
 use ark_relations::r1cs::ConstraintMatrices;
 use ark_std::rand::Rng;
@@ -16,8 +17,9 @@ use crate::{
 };
 
 fn pedersen_vectors<G: CurveGroup>(a: &[G::ScalarField], g_vec: &[G]) -> G {
-    debug_assert_eq!(a.len(), g_vec.len());
-    a.iter().zip(g_vec).map(|(s, p)| *p * *s).sum()
+    let m = a.len().min(g_vec.len()); // keep zip's "stop at the shorter" behavior
+    let bases = G::normalize_batch(&g_vec[..m]); // projective → affine, which msm wants
+    G::msm(&bases, &a[..m]).unwrap()
 }
 
 pub fn commit_two_vectors<G: CurveGroup>(
@@ -67,7 +69,9 @@ fn vecs_hadamard_prod<F: PrimeField>(a: &[F], b: &[F]) -> Vec<F> {
 }
 
 fn vec_gen_prod<G: CurveGroup>(a: &[G::ScalarField], g: &Vec<G>) -> G {
-    a.iter().zip(g).map(|(x, y)| *y * *x).sum()
+    let m = a.len().min(g.len()); // keep zip's "stop at the shorter" behavior
+    let bases = G::normalize_batch(&g[..m]); // projective → affine, which msm wants
+    G::msm(&bases, &a[..m]).unwrap()
 }
 
 fn scalar_vector_mul<G: CurveGroup>(
@@ -393,11 +397,28 @@ mod tests {
 
         // Prove
         let mut transcript_p = Transcript::new(b"r1cs_bp_test");
-        let proof = prove::<G1Projective>(&mats, &instance, &witness, &params, &mut rng, &[], &[], &mut transcript_p);
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &[],
+            &[],
+            &mut transcript_p,
+        );
 
         // Verify with fresh transcript (same label)
         let mut transcript_v = Transcript::new(b"r1cs_bp_test");
-        let ok = verify::<G1Projective>(&mats, &instance, &params, &[], &[], &proof, &mut transcript_v);
+        let ok = verify::<G1Projective>(
+            &mats,
+            &instance,
+            &params,
+            &[],
+            &[],
+            &proof,
+            &mut transcript_v,
+        );
 
         assert!(ok, "honest proof should verify");
     }
@@ -410,14 +431,31 @@ mod tests {
 
         // Prove with correct instance
         let mut transcript_p = Transcript::new(b"r1cs_bp_test");
-        let proof = prove::<G1Projective>(&mats, &instance, &witness, &params, &mut rng, &[], &[], &mut transcript_p);
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &[],
+            &[],
+            &mut transcript_p,
+        );
 
         // Verify with wrong instance: claim out = 36 instead of 35
         let mut wrong_instance = instance.clone();
         wrong_instance[1] = Fr::from(36u32);
 
         let mut transcript_v = Transcript::new(b"r1cs_bp_test");
-        let ok = verify::<G1Projective>(&mats, &wrong_instance, &params, &[], &[], &proof, &mut transcript_v);
+        let ok = verify::<G1Projective>(
+            &mats,
+            &wrong_instance,
+            &params,
+            &[],
+            &[],
+            &proof,
+            &mut transcript_v,
+        );
 
         assert!(!ok, "wrong public input should fail verification");
     }
@@ -433,10 +471,27 @@ mod tests {
         let bad_witness = vec![Fr::from(4u32), Fr::from(16u32), Fr::from(64u32)];
 
         let mut transcript_p = Transcript::new(b"r1cs_bp_test");
-        let proof = prove::<G1Projective>(&mats, &instance, &bad_witness, &params, &mut rng, &[], &[], &mut transcript_p);
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &bad_witness,
+            &params,
+            &mut rng,
+            &[],
+            &[],
+            &mut transcript_p,
+        );
 
         let mut transcript_v = Transcript::new(b"r1cs_bp_test");
-        let ok = verify::<G1Projective>(&mats, &instance, &params, &[], &[], &proof, &mut transcript_v);
+        let ok = verify::<G1Projective>(
+            &mats,
+            &instance,
+            &params,
+            &[],
+            &[],
+            &proof,
+            &mut transcript_v,
+        );
 
         assert!(!ok, "wrong witness should fail verification");
     }
@@ -451,10 +506,27 @@ mod tests {
         let params = make_params(n);
         let mut rng = ark_std::test_rng();
         let mut transcript_p = Transcript::new(b"r1cs_bp_test");
-        let proof = prove::<G1Projective>(&mats, &instance, &witness, &params, &mut rng, &[], &[], &mut transcript_p);
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &[],
+            &[],
+            &mut transcript_p,
+        );
         // sanity: the untampered proof verifies
         let mut transcript_v = Transcript::new(b"r1cs_bp_test");
-        assert!(verify::<G1Projective>(&mats, &instance, &params, &[], &[], &proof, &mut transcript_v));
+        assert!(verify::<G1Projective>(
+            &mats,
+            &instance,
+            &params,
+            &[],
+            &[],
+            &proof,
+            &mut transcript_v
+        ));
         (mats, instance, params, proof)
     }
 
@@ -585,11 +657,28 @@ mod tests {
         let mut rng = ark_std::test_rng();
 
         let mut transcript_p = Transcript::new(b"r1cs_bp_test");
-        let proof = prove::<G1Projective>(&mats, &instance, &witness, &params, &mut rng, &[], &[], &mut transcript_p);
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &[],
+            &[],
+            &mut transcript_p,
+        );
 
         // Verifier uses a different transcript label
         let mut transcript_v = Transcript::new(b"WRONG_LABEL");
-        let ok = verify::<G1Projective>(&mats, &instance, &params, &[], &[], &proof, &mut transcript_v);
+        let ok = verify::<G1Projective>(
+            &mats,
+            &instance,
+            &params,
+            &[],
+            &[],
+            &proof,
+            &mut transcript_v,
+        );
         assert!(!ok, "mismatched transcript label must fail");
     }
 
@@ -627,10 +716,27 @@ mod tests {
         let mut rng = ark_std::test_rng();
 
         let mut transcript_p = Transcript::new(b"r1cs_bp_test");
-        let proof = prove::<G1Projective>(&mats, &instance, &witness, &params, &mut rng, &[], &[], &mut transcript_p);
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &[],
+            &[],
+            &mut transcript_p,
+        );
 
         let mut transcript_v = Transcript::new(b"r1cs_bp_test");
-        let ok = verify::<G1Projective>(&mats, &instance, &params, &[], &[], &proof, &mut transcript_v);
+        let ok = verify::<G1Projective>(
+            &mats,
+            &instance,
+            &params,
+            &[],
+            &[],
+            &proof,
+            &mut transcript_v,
+        );
         assert!(ok, "PowerCircuit(63) honest proof must verify");
     }
 
@@ -666,10 +772,27 @@ mod tests {
         let mut rng = ark_std::test_rng();
 
         let mut transcript_p = Transcript::new(b"r1cs_bp_test");
-        let proof = prove::<G1Projective>(&mats, &instance, &witness, &params, &mut rng, &[], &[], &mut transcript_p);
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &[],
+            &[],
+            &mut transcript_p,
+        );
 
         let mut transcript_v = Transcript::new(b"r1cs_bp_test");
-        let ok = verify::<G1Projective>(&mats, &instance, &params, &[], &[], &proof, &mut transcript_v);
+        let ok = verify::<G1Projective>(
+            &mats,
+            &instance,
+            &params,
+            &[],
+            &[],
+            &proof,
+            &mut transcript_v,
+        );
         assert!(ok, "PowerCircuit(255) honest proof must verify");
     }
 
@@ -864,9 +987,26 @@ mod tests {
         let params = make_params(n);
         let mut rng = ark_std::test_rng();
         let mut tp = Transcript::new(b"r1cs_bp_test");
-        let proof = prove::<G1Projective>(&mats, &instance, &witness, &params, &mut rng, &[], &[], &mut tp);
+        let proof = prove::<G1Projective>(
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &[],
+            &[],
+            &mut tp,
+        );
         let mut tv = Transcript::new(b"r1cs_bp_test");
-        assert!(!verify::<G1Projective>(&mats, &instance, &params, &[], &[], &proof, &mut tv));
+        assert!(!verify::<G1Projective>(
+            &mats,
+            &instance,
+            &params,
+            &[],
+            &[],
+            &proof,
+            &mut tv
+        ));
     }
 
     #[test]
@@ -877,7 +1017,17 @@ mod tests {
         // gate 0: a_L*a_R - a_O = 2*2 - 9 = -5, independent of all challenges
         let violation = Fr::from(4u64) - Fr::from(9u64);
         let mut tp = Transcript::new(b"r1cs_bp_test");
-        let proof = malicious_prove::<G1Projective>(violation, &mats, &instance, &witness, &params, &mut rng, &[], &[], &mut tp);
+        let proof = malicious_prove::<G1Projective>(
+            violation,
+            &mats,
+            &instance,
+            &witness,
+            &params,
+            &mut rng,
+            &[],
+            &[],
+            &mut tp,
+        );
         let mut tv = Transcript::new(b"r1cs_bp_test");
         let accepted = verify::<G1Projective>(&mats, &instance, &params, &[], &[], &proof, &mut tv);
         assert!(
@@ -1050,14 +1200,20 @@ mod tests {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let xv = cs.new_witness_variable(|| Ok(Fr::from(x))).unwrap();
         let yv = cs.new_witness_variable(|| Ok(Fr::from(x * x))).unwrap();
-        cs.enforce_constraint(lc!() + xv, lc!() + xv, lc!() + yv).unwrap();
+        cs.enforce_constraint(lc!() + xv, lc!() + xv, lc!() + yv)
+            .unwrap();
         cs.finalize();
         assert!(cs.is_satisfied().unwrap());
         let mats = cs.to_matrices().unwrap();
         let b = cs.borrow().unwrap();
         // +1 row per committed value doesn't change the gate count
         let n = (mats.num_constraints + mats.num_witness_variables).next_power_of_two();
-        (mats, b.instance_assignment.clone(), b.witness_assignment.clone(), n)
+        (
+            mats,
+            b.instance_assignment.clone(),
+            b.witness_assignment.clone(),
+            n,
+        )
     }
 
     fn commit_v(params: &ProofParams<G1Projective>, v: Fr, gamma: Fr) -> G1Projective {
@@ -1068,7 +1224,13 @@ mod tests {
     fn prove_committed(
         committed: &[usize],
         gammas: &[Fr],
-    ) -> (ConstraintMatrices<Fr>, Vec<Fr>, Vec<Fr>, ProofParams<G1Projective>, Proof<G1Projective>) {
+    ) -> (
+        ConstraintMatrices<Fr>,
+        Vec<Fr>,
+        Vec<Fr>,
+        ProofParams<G1Projective>,
+        Proof<G1Projective>,
+    ) {
         let (mats, instance, witness, n) = square_witness_setup(3);
         let params = make_params(n);
         let mut rng = ark_std::test_rng();
@@ -1112,7 +1274,14 @@ mod tests {
         let gamma = Fr::from(7u64);
         let (mats, inst, _, params, proof) = prove_committed(&[1], &[gamma]);
         let wrong = commit_v(&params, Fr::from(10u64), gamma); // claims y = 10
-        assert!(!verify_committed(&mats, &inst, &params, &[1], &[wrong], &proof));
+        assert!(!verify_committed(
+            &mats,
+            &inst,
+            &params,
+            &[1],
+            &[wrong],
+            &proof
+        ));
     }
 
     #[test]
@@ -1120,7 +1289,14 @@ mod tests {
         let gamma = Fr::from(7u64);
         let (mats, inst, _, params, proof) = prove_committed(&[1], &[gamma]);
         let wrong = commit_v(&params, Fr::from(9u64), gamma + Fr::from(1u64));
-        assert!(!verify_committed(&mats, &inst, &params, &[1], &[wrong], &proof));
+        assert!(!verify_committed(
+            &mats,
+            &inst,
+            &params,
+            &[1],
+            &[wrong],
+            &proof
+        ));
     }
 
     #[test]
@@ -1144,8 +1320,22 @@ mod tests {
         let (mats, inst, _, params, proof) = prove_committed(&[0, 1], &[g0, g1]);
         let vx = commit_v(&params, Fr::from(3u64), g0);
         let vy = commit_v(&params, Fr::from(9u64), g1);
-        assert!(verify_committed(&mats, &inst, &params, &[0, 1], &[vx, vy], &proof));
-        assert!(!verify_committed(&mats, &inst, &params, &[0, 1], &[vy, vx], &proof));
+        assert!(verify_committed(
+            &mats,
+            &inst,
+            &params,
+            &[0, 1],
+            &[vx, vy],
+            &proof
+        ));
+        assert!(!verify_committed(
+            &mats,
+            &inst,
+            &params,
+            &[0, 1],
+            &[vy, vx],
+            &proof
+        ));
     }
 
     #[test]
@@ -1160,9 +1350,24 @@ mod tests {
         let gamma = Fr::from(0u64);
         let mut tp = Transcript::new(b"r1cs_bp_test");
         let proof = lying_prove::<G1Projective>(
-            claimed, &mats, &inst, &witness, &params, &mut rng, &[1], &[gamma], &mut tp,
+            claimed,
+            &mats,
+            &inst,
+            &witness,
+            &params,
+            &mut rng,
+            &[1],
+            &[gamma],
+            &mut tp,
         );
         let v_lie = commit_v(&params, claimed, gamma);
-        assert!(!verify_committed(&mats, &inst, &params, &[1], &[v_lie], &proof));
+        assert!(!verify_committed(
+            &mats,
+            &inst,
+            &params,
+            &[1],
+            &[v_lie],
+            &proof
+        ));
     }
 }
